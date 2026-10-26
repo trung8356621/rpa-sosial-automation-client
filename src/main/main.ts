@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, Menu } from "electron";
+import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { initializeMainLogging, logClientError, logClientEvent, setLogListener } from "./main-error-log.js";
@@ -12,6 +13,9 @@ import type { ClientCommand } from "../shared/contracts.js";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const project = path.resolve(root, "..");
 
+const isSmokeTest = process.argv.includes("--smoke-test");
+const autoConnectKey = process.argv.find((a) => a.startsWith("--connect-key="))?.split("=")[1];
+
 // Windows userData is strictly isolated to .local/client (never .local/creator)
 const userDataPath = path.join(project, ".local", "client");
 app.setPath("userData", userDataPath);
@@ -19,7 +23,7 @@ app.setPath("sessionData", path.join(userDataPath, "chromium"));
 
 // Single-instance lock
 const gotTheLock = app.requestSingleInstanceLock();
-if (!gotTheLock) {
+if (!gotTheLock && !isSmokeTest) {
   console.log("Another instance of RPA Client is already running. Exiting.");
   app.quit();
   process.exit(0);
@@ -84,7 +88,7 @@ app.on("before-quit", () => {
 
 app.on("window-all-closed", () => {
   // On Windows, keep running in background tray unless isQuitting is true
-  if (isQuitting) {
+  if (isQuitting || isSmokeTest) {
     app.quit();
   }
 });
@@ -145,10 +149,38 @@ async function bootstrap() {
     }
   });
 
-  // Auto-reconnect if saved credential exists
-  if (credentials.hasKey()) {
+  // Auto-connect if requested by CLI or saved credential exists
+  if (autoConnectKey) {
+    logClientEvent("Connecting via CLI key parameter");
+    try {
+      await connection.connect(autoConnectKey);
+    } catch (err) {
+      logClientError("CLI auto-connect failed", err);
+    }
+  } else if (credentials.hasKey()) {
     logClientEvent("Found saved credentials, initiating auto-reconnect");
     void connection.reconnectSaved();
+  }
+
+  if (isSmokeTest) {
+    logClientEvent("Smoke test mode active, scheduling screenshot capture");
+    setTimeout(async () => {
+      try {
+        const image = await mainWindow!.webContents.capturePage();
+        const screenshotsDir = path.join(project, "screenshots");
+        await mkdir(screenshotsDir, { recursive: true });
+        const outPath = path.join(screenshotsDir, "client-window.png");
+        await writeFile(outPath, image.toPNG());
+        logClientEvent("Screenshot captured successfully", { outPath });
+        console.log("[SMOKE_TEST_PASS] Screenshot saved to " + outPath);
+      } catch (e) {
+        console.error("Screenshot capture failed:", e);
+      } finally {
+        isQuitting = true;
+        trayManager?.destroy();
+        app.quit();
+      }
+    }, 2500);
   }
 }
 
