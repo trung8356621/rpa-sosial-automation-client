@@ -41,11 +41,26 @@ test("BrowserSync: formats target metadata schema and strictly omits forbidden f
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
+    {
+      browserId: "b3f36077-9ca6-4d26-a94f-a7f45b331003",
+      name: "Generic Site Profile",
+      platform: "general",
+      partition: "persist:rpa-client-b3f36077-9ca6-4d26-a94f-a7f45b331003",
+      status: "stopped",
+      sessionSignal: {
+        status: "present",
+        checkedAt: "2026-10-26T12:10:00Z",
+        method: "site_cookie_presence",
+      },
+      lastUrl: "https://example.org",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
   ];
 
   const sanitized = sanitizeProfilesForSync(profiles);
 
-  assert.equal(sanitized.length, 2);
+  assert.equal(sanitized.length, 3);
 
   // Target schema verification for profile 1
   assert.equal(sanitized[0].browser_id, "b3f36077-9ca6-4d26-a94f-a7f45b331001");
@@ -80,6 +95,15 @@ test("BrowserSync: formats target metadata schema and strictly omits forbidden f
     status: "unknown",
     checked_at: null,
     method: null,
+  });
+
+  // Verify generic site session signal for profile 3
+  assert.equal(sanitized[2].browser_id, "b3f36077-9ca6-4d26-a94f-a7f45b331003");
+  assert.equal(sanitized[2].platform, "general");
+  assert.deepEqual(sanitized[2].session_signal, {
+    status: "present",
+    checked_at: "2026-10-26T12:10:00Z",
+    method: "site_cookie_presence",
   });
 
   // Verify none of forbidden keys exist anywhere in payload

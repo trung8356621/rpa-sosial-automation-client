@@ -357,9 +357,9 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
             </div>
             <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
               {activeProfile.sessionSignal?.status === "present" ? (
-                <span style={{ color: "#34d399", fontWeight: 600 }}>● Tín hiệu FB: Có c_user</span>
+                <span style={{ color: "#34d399", fontWeight: 600 }}>● Có tín hiệu phiên</span>
               ) : activeProfile.sessionSignal?.status === "absent" ? (
-                <span style={{ color: "#fbbf24" }}>○ Tín hiệu FB: Chưa phát hiện</span>
+                <span style={{ color: "#fbbf24" }}>○ Không có cookie</span>
               ) : (
                 <span style={{ color: "#94a3b8" }}>Tín hiệu: Chưa kiểm tra</span>
               )}
@@ -568,12 +568,12 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
                     <span className="meta-label">Tín hiệu Session:</span>
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                       {signalStatus === "present" ? (
-                        <span className="signal-pill present" title="Phát hiện cookie c_user trong Chromium session">
-                          ● Có tín hiệu FB
+                        <span className="signal-pill present" title={p.sessionSignal?.method === "facebook_c_user_cookie" ? "Phát hiện cookie c_user" : "Phát hiện cookie phiên từ site"}>
+                          ● Có tín hiệu phiên
                         </span>
                       ) : signalStatus === "absent" ? (
-                        <span className="signal-pill absent" title="Không phát hiện cookie c_user">
-                          ○ Chưa phát hiện
+                        <span className="signal-pill absent" title="Không phát hiện cookie trong session">
+                          ○ Không có cookie
                         </span>
                       ) : (
                         <span className="signal-pill unknown">

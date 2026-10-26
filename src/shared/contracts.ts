@@ -53,7 +53,7 @@ export interface AccountBinding {
 export interface SessionSignal {
   status: "present" | "absent" | "unknown";
   checkedAt: string | null;
-  method: "facebook_c_user_cookie" | null;
+  method: "facebook_c_user_cookie" | "site_cookie_presence" | null;
 }
 
 export interface ExecutionConfirmation {

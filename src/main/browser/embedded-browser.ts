@@ -141,9 +141,7 @@ export class EmbeddedBrowser {
       if (/^https?:\/\//.test(url)) {
         this.currentUrl = url;
         void this.profileManager.recordUrl(browserId, url);
-        if (url.includes("facebook.com")) {
-          void this.checkSessionSignal(browserId);
-        }
+        void this.checkSessionSignal(browserId);
         this.notify();
       }
     };
@@ -282,6 +280,47 @@ export class EmbeddedBrowser {
         return signal;
       } catch (err) {
         logClientError("Error checking session signal", err);
+      }
+    }
+
+    // Generic fallback for other platforms / websites
+    const targetUrl = (this.activeBrowserId === targetId && this.currentUrl)
+      ? this.currentUrl
+      : profile.lastUrl || (profile.platform ? `https://${profile.platform}.com` : "");
+
+    if (targetUrl) {
+      try {
+        const parsed = new URL(targetUrl);
+        if (["http:", "https:"].includes(parsed.protocol)) {
+          let hasCookies = false;
+          if (this.view && this.activeBrowserId === targetId) {
+            const cookies = await this.view.webContents.session.cookies.get({ url: parsed.href });
+            hasCookies = cookies.length > 0;
+          } else {
+            const sess = session.fromPartition(profile.partition);
+            const cookies = await sess.cookies.get({ url: parsed.href });
+            hasCookies = cookies.length > 0;
+          }
+
+          const signal: SessionSignal = {
+            status: hasCookies ? "present" : "absent",
+            checkedAt: new Date().toISOString(),
+            method: "site_cookie_presence",
+          };
+
+          logClientEvent("Checked generic session signal for profile", {
+            browserId: targetId,
+            status: signal.status,
+            method: signal.method,
+            origin: parsed.origin,
+          });
+
+          await this.profileManager.updateSessionSignal(targetId, signal);
+          void this.syncService.syncAll();
+          return signal;
+        }
+      } catch (err) {
+        logClientError("Error checking generic session signal", err);
       }
     }
 

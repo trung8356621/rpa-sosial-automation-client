@@ -19,7 +19,7 @@ export interface TargetBrowserPayload {
   session_signal: {
     status: "present" | "absent" | "unknown";
     checked_at: string | null;
-    method: "facebook_c_user_cookie" | null;
+    method: "facebook_c_user_cookie" | "site_cookie_presence" | null;
   };
   execution_confirmation: {
     status: "not_run" | "pending_review" | "confirmed" | "failed";
