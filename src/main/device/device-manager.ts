@@ -38,6 +38,13 @@ export class DeviceManager {
     return this.getDeviceInfo();
   }
 
+  getDeviceId(): string {
+    if (!this.deviceId) {
+      throw new Error("DeviceManager must be initialized before getDeviceId");
+    }
+    return this.deviceId;
+  }
+
   getDeviceInfo(): DeviceInfo {
     if (!this.deviceId) {
       throw new Error("DeviceManager must be initialized before getDeviceInfo");

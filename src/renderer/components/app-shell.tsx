@@ -2,8 +2,9 @@ import React, { useEffect, useState } from "react";
 import type { ConnectionState } from "../../shared/contracts.js";
 import { DeviceStatusPanel } from "./device-status-panel.js";
 import { ConnectionSettingsPanel } from "./connection-settings-panel.js";
+import { BrowserProfilesPanel } from "./browser-profiles-panel.js";
 
-type Tab = "status" | "settings" | "logs";
+type Tab = "status" | "browser" | "settings" | "logs";
 
 interface LogEntry {
   time: string;
@@ -13,8 +14,9 @@ interface LogEntry {
 
 export function AppShell() {
   const [state, setState] = useState<ConnectionState | null>(null);
-  const [activeTab, setActiveTab] = useState<Tab>("status");
+  const [activeTab, setActiveTab] = useState<Tab>("browser");
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [toast, setToast] = useState<string | null>(null);
 
   const refreshState = async () => {
     try {
@@ -23,6 +25,13 @@ export function AppShell() {
     } catch {
       // ignore
     }
+  };
+
+  const showNotification = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => {
+      setToast((curr) => (curr === msg ? null : curr));
+    }, 3500);
   };
 
   useEffect(() => {
@@ -65,6 +74,7 @@ export function AppShell() {
         </div>
 
         <div className="header-actions">
+          {toast && <div className="toast-pill">{toast}</div>}
           <div
             className={`status-pill ${
               isOnline ? "online" : isConnecting ? "connecting" : state.status === "error" ? "error" : "offline"
@@ -84,6 +94,13 @@ export function AppShell() {
 
       <div className="app-body">
         <aside className="nav-sidebar">
+          <button
+            type="button"
+            className={`nav-item ${activeTab === "browser" ? "active" : ""}`}
+            onClick={() => setActiveTab("browser")}
+          >
+            🌐 Browser Profiles
+          </button>
           <button
             type="button"
             className={`nav-item ${activeTab === "status" ? "active" : ""}`}
@@ -108,6 +125,13 @@ export function AppShell() {
         </aside>
 
         <main className="main-content">
+          <div style={{ display: activeTab === "browser" ? "block" : "none" }}>
+            <BrowserProfilesPanel
+              isActiveTab={activeTab === "browser"}
+              onNotify={showNotification}
+            />
+          </div>
+
           {activeTab === "status" && (
             <>
               <DeviceStatusPanel state={state} onUpdate={refreshState} />
@@ -125,7 +149,7 @@ export function AppShell() {
               <div className="card-desc">
                 Nhật ký vận hành cục bộ. Thông tin bảo mật (API Key) được lọc tự động trước khi ghi.
               </div>
-              <div className="log-card" style={{ maxHeight: 420 }}>
+              <div className="log-card" style={{ maxHeight: 520 }}>
                 {logs.length === 0 ? (
                   <div style={{ color: "#475569" }}>Chưa có log mới</div>
                 ) : (
@@ -135,22 +159,6 @@ export function AppShell() {
                     </div>
                   ))
                 )}
-              </div>
-            </div>
-          )}
-
-          {/* Quick preview log box on status tab */}
-          {activeTab === "status" && logs.length > 0 && (
-            <div className="card">
-              <div className="card-title" style={{ fontSize: 13 }}>
-                Nhật ký gần đây
-              </div>
-              <div className="log-card">
-                {logs.slice(0, 5).map((l, i) => (
-                  <div key={i} className={`log-entry ${l.level}`}>
-                    <span style={{ color: "#64748b" }}>[{l.time.slice(11, 19)}]</span> {l.message}
-                  </div>
-                ))}
               </div>
             </div>
           )}

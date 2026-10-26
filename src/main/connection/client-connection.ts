@@ -261,6 +261,58 @@ export class ClientConnection {
     }
   }
 
+  getDeviceId(): string {
+    return this.deviceManager.getDeviceId();
+  }
+
+  getEndpoint(): string {
+    return this.store.get().endpoint;
+  }
+
+  getApiKey(): string | null {
+    return this.credentials.getKey();
+  }
+
+  isOnline(): boolean {
+    return this.status === "connected" && this.online;
+  }
+
+  async requestWithAuth(
+    subpath: string,
+    method: "GET" | "POST",
+    body?: Record<string, unknown>,
+    extraHeaders?: Record<string, string>
+  ): Promise<Record<string, unknown>> {
+    const key = this.credentials.getKey();
+    if (!key) {
+      throw new Error("No API key available for request");
+    }
+    const endpoint = this.store.get().endpoint;
+    const url = `${endpoint}${subpath}`;
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${key}`,
+      Accept: "application/json",
+      "X-Device-Id": this.deviceManager.getDeviceId(),
+      ...extraHeaders,
+    };
+    if (body) {
+      headers["Content-Type"] = "application/json";
+    }
+
+    const isDevUrl = endpoint.includes(".test") || endpoint.includes("localhost") || endpoint.includes("127.0.0.1");
+    if (isDevUrl && process.env.NODE_TLS_REJECT_UNAUTHORIZED === undefined) {
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+    }
+
+    const res = await fetch(url, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+
+    return await readSeoOpsJson(res, method, url);
+  }
+
   private async request(
     endpoint: string,
     subpath: string,
