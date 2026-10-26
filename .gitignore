@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.local/
+*.log
+*.token
+*.key
+screenshots/
+coverage/
+.env
+.env.local
+.DS_Store
+Thumbs.db
