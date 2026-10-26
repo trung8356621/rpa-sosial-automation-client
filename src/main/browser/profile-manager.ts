@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
-import type { BrowserProfile } from "../../shared/contracts.js";
+import type { BrowserProfile, SessionSignal } from "../../shared/contracts.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
 
 function validateName(name: string): string {
@@ -30,6 +30,15 @@ export class ProfileManager {
             ...p,
             // When starting up after restart or crash, all browsers must start as 'stopped'
             status: "stopped" as const,
+            accountBinding: p.accountBinding || { accountId: null, boundAt: null },
+            sessionSignal: p.sessionSignal || { status: "unknown", checkedAt: null, method: null },
+            executionConfirmation: p.executionConfirmation || {
+              status: "not_run",
+              firstRunAt: null,
+              lastSuccessAt: null,
+              lastRunId: null,
+              screenshotRef: null,
+            },
           }));
         }
       }
@@ -68,6 +77,15 @@ export class ProfileManager {
       // Partition is strictly tied to browserId and NEVER changes on rename
       partition: `persist:rpa-client-${browserId}`,
       status: "stopped",
+      accountBinding: { accountId: null, boundAt: null },
+      sessionSignal: { status: "unknown", checkedAt: null, method: null },
+      executionConfirmation: {
+        status: "not_run",
+        firstRunAt: null,
+        lastSuccessAt: null,
+        lastRunId: null,
+        screenshotRef: null,
+      },
       createdAt: now,
       updatedAt: now,
     };
@@ -90,6 +108,72 @@ export class ProfileManager {
     await this.save();
     logClientEvent("Renamed browser profile", { browserId, newName: validName });
     return profile;
+  }
+
+  async bindAccount(browserId: string, accountId: string, accountName?: string): Promise<BrowserProfile> {
+    const profile = this.get(browserId);
+    if (!profile) {
+      throw new Error(`Browser profile ${browserId} không tồn tại.`);
+    }
+
+    const prevAccountId = profile.accountBinding?.accountId ?? null;
+    const isAccountSwitch = prevAccountId !== accountId;
+
+    if (isAccountSwitch) {
+      // E5.3: Reset execution confirmation when switching account
+      profile.executionConfirmation = {
+        status: "not_run",
+        firstRunAt: null,
+        lastSuccessAt: null,
+        lastRunId: null,
+        screenshotRef: null,
+      };
+      logClientEvent("Switched bound account, reset execution confirmation", { browserId, prevAccountId, newAccountId: accountId });
+    }
+
+    profile.accountBinding = {
+      accountId,
+      boundAt: new Date().toISOString(),
+      accountName,
+    };
+    profile.updatedAt = new Date().toISOString();
+
+    await this.save();
+    logClientEvent("Bound account to browser profile", { browserId, accountId, accountName });
+    return profile;
+  }
+
+  async unbindAccount(browserId: string): Promise<BrowserProfile> {
+    const profile = this.get(browserId);
+    if (!profile) {
+      throw new Error(`Browser profile ${browserId} không tồn tại.`);
+    }
+
+    profile.accountBinding = {
+      accountId: null,
+      boundAt: null,
+    };
+    profile.executionConfirmation = {
+      status: "not_run",
+      firstRunAt: null,
+      lastSuccessAt: null,
+      lastRunId: null,
+      screenshotRef: null,
+    };
+    profile.updatedAt = new Date().toISOString();
+
+    await this.save();
+    logClientEvent("Unbound account from browser profile", { browserId });
+    return profile;
+  }
+
+  async updateSessionSignal(browserId: string, signal: SessionSignal): Promise<void> {
+    const profile = this.get(browserId);
+    if (!profile) return;
+
+    profile.sessionSignal = signal;
+    profile.updatedAt = new Date().toISOString();
+    await this.save();
   }
 
   async delete(browserId: string): Promise<boolean> {

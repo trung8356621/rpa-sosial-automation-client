@@ -18,6 +18,7 @@ const project = path.resolve(root, "..");
 
 const isSmokeTest = process.argv.includes("--smoke-test");
 const isCaptureM3 = process.argv.includes("--capture-m3");
+const isCaptureM4 = process.argv.includes("--capture-m4");
 const autoConnectKey = process.argv.find((a) => a.startsWith("--connect-key="))?.split("=")[1];
 
 // Windows userData is strictly isolated to .local/client (never .local/creator)
@@ -27,7 +28,7 @@ app.setPath("sessionData", path.join(userDataPath, "chromium"));
 
 // Single-instance lock
 const gotTheLock = app.requestSingleInstanceLock();
-if (!gotTheLock && !isSmokeTest && !isCaptureM3) {
+if (!gotTheLock && !isSmokeTest && !isCaptureM3 && !isCaptureM4) {
   console.log("Another instance of RPA Client is already running. Exiting.");
   app.quit();
   process.exit(0);
@@ -253,6 +254,26 @@ async function bootstrap() {
         embeddedBrowser!.setVisible(cmd.visible);
         return true;
       }
+      case "getAccounts": {
+        return await syncService!.getAccounts(cmd.platform);
+      }
+      case "bindAccount": {
+        const updated = await profileManager.bindAccount(cmd.browserId, cmd.accountId, cmd.accountName);
+        void syncService?.syncAll();
+        broadcastBrowserState();
+        return updated;
+      }
+      case "unbindAccount": {
+        const updated = await profileManager.unbindAccount(cmd.browserId);
+        void syncService?.syncAll();
+        broadcastBrowserState();
+        return updated;
+      }
+      case "checkSessionSignal": {
+        const signal = await embeddedBrowser!.checkSessionSignal(cmd.browserId);
+        broadcastBrowserState();
+        return signal;
+      }
 
       default:
         throw new Error(`Unknown command type: ${(cmd as { type: string }).type}`);
@@ -270,6 +291,57 @@ async function bootstrap() {
   } else if (credentials.hasKey()) {
     logClientEvent("Found saved credentials, initiating auto-reconnect");
     void connection.reconnectSaved();
+  }
+
+  if (isCaptureM4) {
+    const artifactsDir = "C:\\Users\\Admin\\.gemini\\antigravity\\brain\\14aac746-126d-42f6-8319-634670695e24";
+    const screenshotsDir = path.join(project, "screenshots");
+    await mkdir(screenshotsDir, { recursive: true });
+
+    setTimeout(async () => {
+      try {
+        logClientEvent("M4 capture started");
+        if (profileManager.list().length < 2) {
+          await profileManager.create("Facebook Marketing 01", "facebook");
+          await profileManager.create("Facebook Group Seeding", "facebook");
+        }
+
+        // Fetch accounts from SEO-OPS
+        const accounts = await syncService?.getAccounts("facebook");
+        const targetAcc = accounts?.[0] || {
+          accountId: "116ac740-73e6-4416-ab59-1b36d24e10fd",
+          displayName: "Facebook Seeding 02",
+        };
+
+        const profiles = profileManager.list();
+        // Bind profile 0 to target account
+        await profileManager.bindAccount(profiles[0].browserId, targetAcc.accountId, targetAcc.displayName);
+        // Set sample session signal on profile 0 (present)
+        await profileManager.updateSessionSignal(profiles[0].browserId, {
+          status: "present",
+          checkedAt: new Date().toISOString(),
+          method: "facebook_c_user_cookie",
+        });
+
+        broadcastBrowserState();
+        await syncService?.syncAll();
+
+        // 1. Capture Client UI with Account Binding and Session Signal
+        await new Promise((r) => setTimeout(r, 1500));
+        const img1 = await mainWindow!.webContents.capturePage();
+        await writeFile(path.join(screenshotsDir, "client-browser-binding.png"), img1.toPNG());
+        await writeFile(path.join(artifactsDir, "client-browser-binding.png"), img1.toPNG());
+        logClientEvent("Captured client-browser-binding.png");
+
+        console.log("[M4_CLIENT_CAPTURE_COMPLETE] Client binding screenshot saved.");
+      } catch (e) {
+        logClientError("M4 capture fatal error", e);
+      } finally {
+        isQuitting = true;
+        trayManager?.destroy();
+        app.quit();
+      }
+    }, 2500);
   }
 
   if (isCaptureM3) {

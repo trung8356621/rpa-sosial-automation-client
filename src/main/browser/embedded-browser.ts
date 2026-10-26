@@ -1,5 +1,5 @@
-import { WebContentsView, type BrowserWindow } from "electron";
-import type { BrowserProfile, BrowserViewState } from "../../shared/contracts.js";
+import { WebContentsView, session, type BrowserWindow } from "electron";
+import type { BrowserProfile, BrowserViewState, SessionSignal } from "../../shared/contracts.js";
 import type { ProfileManager } from "./profile-manager.js";
 import type { BrowserSyncService } from "./browser-sync-service.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
@@ -42,8 +42,8 @@ export class EmbeddedBrowser {
       activeBrowserId: this.activeBrowserId,
       currentUrl: this.currentUrl,
       isLoading: this.isLoading,
-      canGoBack: Boolean(wc?.canGoBack()),
-      canGoForward: Boolean(wc?.canGoForward()),
+      canGoBack: Boolean(wc?.navigationHistory?.canGoBack ? wc.navigationHistory.canGoBack() : wc?.canGoBack()),
+      canGoForward: Boolean(wc?.navigationHistory?.canGoForward ? wc.navigationHistory.canGoForward() : wc?.canGoForward()),
       visible: this.visible,
     };
   }
@@ -140,7 +140,10 @@ export class EmbeddedBrowser {
     const updateUrl = (url: string) => {
       if (/^https?:\/\//.test(url)) {
         this.currentUrl = url;
-        this.profileManager.recordUrl(browserId, url);
+        void this.profileManager.recordUrl(browserId, url);
+        if (url.includes("facebook.com")) {
+          void this.checkSessionSignal(browserId);
+        }
         this.notify();
       }
     };
@@ -158,6 +161,9 @@ export class EmbeddedBrowser {
     await this.navigate(targetUrl).catch((err) => {
       logClientError("Initial browser navigation failed", err);
     });
+
+    // Check session signal on browser open
+    void this.checkSessionSignal(browserId);
 
     // Sync status change to SEO-OPS
     void this.syncService.syncAll();
@@ -231,15 +237,74 @@ export class EmbeddedBrowser {
     }
   }
 
+  /**
+   * E5.2: Detect session presence signal (e.g. c_user cookie on Facebook).
+   * Strict security rule: Only checks presence (true/false).
+   * NEVER saves, logs, displays, or transmits cookie value.
+   */
+  async checkSessionSignal(browserId?: string): Promise<SessionSignal> {
+    const targetId = browserId || this.activeBrowserId;
+    if (!targetId) {
+      return { status: "unknown", checkedAt: null, method: null };
+    }
+
+    const profile = this.profileManager.get(targetId);
+    if (!profile) {
+      return { status: "unknown", checkedAt: null, method: null };
+    }
+
+    if (profile.platform.toLowerCase() === "facebook") {
+      try {
+        let hasCUser = false;
+        if (this.view && this.activeBrowserId === targetId) {
+          const cookies = await this.view.webContents.session.cookies.get({ name: "c_user" });
+          hasCUser = cookies.length > 0;
+        } else {
+          const sess = session.fromPartition(profile.partition);
+          const cookies = await sess.cookies.get({ name: "c_user" });
+          hasCUser = cookies.length > 0;
+        }
+
+        const signal: SessionSignal = {
+          status: hasCUser ? "present" : "absent",
+          checkedAt: new Date().toISOString(),
+          method: "facebook_c_user_cookie",
+        };
+
+        logClientEvent("Checked session signal for profile", {
+          browserId: targetId,
+          status: signal.status,
+          method: signal.method,
+        });
+
+        await this.profileManager.updateSessionSignal(targetId, signal);
+        void this.syncService.syncAll();
+        return signal;
+      } catch (err) {
+        logClientError("Error checking session signal", err);
+      }
+    }
+
+    const fallbackSignal: SessionSignal = {
+      status: "unknown",
+      checkedAt: new Date().toISOString(),
+      method: null,
+    };
+    await this.profileManager.updateSessionSignal(targetId, fallbackSignal);
+    return fallbackSignal;
+  }
+
   goBack(): void {
-    if (this.view?.webContents.canGoBack()) {
-      this.view.webContents.goBack();
+    const wc = this.view?.webContents;
+    if (wc?.navigationHistory?.canGoBack ? wc.navigationHistory.canGoBack() : wc?.canGoBack()) {
+      wc?.navigationHistory?.goBack ? wc.navigationHistory.goBack() : wc?.goBack();
     }
   }
 
   goForward(): void {
-    if (this.view?.webContents.canGoForward()) {
-      this.view.webContents.goForward();
+    const wc = this.view?.webContents;
+    if (wc?.navigationHistory?.canGoForward ? wc.navigationHistory.canGoForward() : wc?.canGoForward()) {
+      wc?.navigationHistory?.goForward ? wc.navigationHistory.goForward() : wc?.goForward();
     }
   }
 
