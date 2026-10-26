@@ -53,38 +53,4 @@ export function resolveInitialUrl(platform: string, siteUrl?: string | null): st
   throw new Error(`Không xác định được URL cho nền tảng "${platform}". Vui lòng cấu hình Site URL trên SEO-OPS.`);
 }
 
-/**
- * Auto-detects website / Browser Tag from the currently navigated URL.
- * Operates like RPA Admin: tags are inferred dynamically from active URL, not chosen manually.
- */
-export function detectBrowserTagFromUrl(url: string): string {
-  if (!url || typeof url !== "string") {
-    return "unknown";
-  }
-
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase();
-
-    if (host.includes("facebook.com") || host.includes("fb.com")) {
-      return "facebook";
-    }
-    if (host.includes("threads.net")) {
-      return "threads";
-    }
-    if (host.includes("instagram.com")) {
-      return "instagram";
-    }
-    if (host.includes("x.com") || host.includes("twitter.com")) {
-      return "x";
-    }
-    if (host.includes("tiktok.com")) {
-      return "tiktok";
-    }
-
-    // Custom website / WordPress host
-    return host.replace(/^www\./, "");
-  } catch {
-    return "unknown";
-  }
-}
+export { detectBrowserTagFromUrl, isDomainMatchingAccount } from "../../shared/contracts.js";

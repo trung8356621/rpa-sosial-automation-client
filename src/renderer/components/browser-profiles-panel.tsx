@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import {
   type BrowserProfile,
   type BrowserStateSnapshot,
@@ -8,14 +8,13 @@ import {
 
 interface BrowserProfilesPanelProps {
   onNotify?: (msg: string) => void;
-  isActiveTab: boolean;
+  onOpenBrowser?: (browserId: string) => void;
 }
 
-export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesPanelProps) {
+export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfilesPanelProps) {
   const [snapshot, setSnapshot] = useState<BrowserStateSnapshot | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
-  const [addressInput, setAddressInput] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
 
   // Account-first selection state
@@ -24,8 +23,6 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
   const [availableAccounts, setAvailableAccounts] = useState<AccountInfo[]>([]);
   const [loadingAccounts, setLoadingAccounts] = useState(false);
   const [checkingSignalId, setCheckingSignalId] = useState<string | null>(null);
-
-  const containerRef = useRef<HTMLDivElement | null>(null);
 
   const refreshState = useCallback(async () => {
     try {
@@ -36,59 +33,15 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
     }
   }, []);
 
-  // Update bounds of WebContentsView whenever container resizes or tab becomes active
-  const updateBounds = useCallback(() => {
-    if (!containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    if (rect.width > 0 && rect.height > 0) {
-      void window.client.invoke({
-        type: "setBrowserViewBounds",
-        bounds: {
-          x: Math.round(rect.left),
-          y: Math.round(rect.top),
-          width: Math.round(rect.width),
-          height: Math.round(rect.height),
-        },
-      });
-    }
-  }, []);
-
   useEffect(() => {
     void refreshState();
 
     const unsub = window.client.onBrowserStateChange((next) => {
       setSnapshot(next);
-      if (next.viewState.currentUrl) {
-        setAddressInput(next.viewState.currentUrl);
-      }
     });
 
     return () => unsub();
   }, [refreshState]);
-
-  // Handle visibility & resize
-  useEffect(() => {
-    const hasActive = Boolean(snapshot?.activeBrowserId);
-    const visible = isActiveTab && hasActive;
-
-    void window.client.invoke({
-      type: "setBrowserViewVisible",
-      visible,
-    });
-
-    if (visible) {
-      updateBounds();
-      const observer = new ResizeObserver(() => updateBounds());
-      if (containerRef.current) {
-        observer.observe(containerRef.current);
-      }
-      window.addEventListener("resize", updateBounds);
-      return () => {
-        observer.disconnect();
-        window.removeEventListener("resize", updateBounds);
-      };
-    }
-  }, [isActiveTab, snapshot?.activeBrowserId, updateBounds]);
 
   const loadAccounts = async (platform?: string) => {
     setLoadingAccounts(true);
@@ -145,6 +98,7 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
           accountName: acc.displayName,
           email: acc.email,
           siteUrl: acc.siteUrl,
+          platform: acc.platform,
         });
 
         setShowAccountModal(false);
@@ -166,6 +120,7 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
             browserId: existingProfile.browserId,
           });
           await refreshState();
+          onOpenBrowser?.(existingProfile.browserId);
           return;
         }
 
@@ -183,6 +138,7 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
           browserId: result.profile.browserId,
         });
         await refreshState();
+        onOpenBrowser?.(result.profile.browserId);
       }
     } catch (err) {
       alert((err as Error).message);
@@ -251,6 +207,7 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
       });
       onNotify?.("Đã mở trình duyệt");
       await refreshState();
+      onOpenBrowser?.(profile.browserId);
     } catch (err) {
       alert((err as Error).message);
     } finally {
@@ -273,19 +230,6 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
     }
   };
 
-  const handleNavigate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!addressInput.trim()) return;
-    try {
-      await window.client.invoke({
-        type: "navigateBrowser",
-        url: addressInput.trim(),
-      });
-    } catch (err) {
-      alert((err as Error).message);
-    }
-  };
-
   const handleCheckSignal = async (profile: BrowserProfile) => {
     setCheckingSignalId(profile.browserId);
     try {
@@ -302,198 +246,11 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
     }
   };
 
-  const handleCopyEmail = async (email: string) => {
-    try {
-      await window.client.invoke({ type: "copyToClipboard", text: email });
-      if (navigator.clipboard) {
-        await navigator.clipboard.writeText(email);
-      }
-      onNotify?.(`Đã copy Email: ${email}`);
-    } catch {
-      alert(`Không thể copy email. Giá trị: ${email}`);
-    }
-  };
-
-  const handleCopyPassword = () => {
-    // Blocker notice per security guidelines:
-    // Shared Client API Key cannot securely authorize plaintext credential disclosure.
-    alert(
-      "Chưa thể copy mật khẩu từ xa: Cơ chế Client API Key dùng chung chưa hỗ trợ phân quyền giải mã mật khẩu an toàn. Vui lòng nhập mật khẩu trực tiếp bằng tay."
-    );
-  };
-
   const profiles = snapshot?.profiles ?? [];
   const activeBrowserId = snapshot?.activeBrowserId;
-  const activeProfile = profiles.find((p) => p.browserId === activeBrowserId);
-  const viewState = snapshot?.viewState;
-  const currentWebsiteTag = detectBrowserTagFromUrl(viewState?.currentUrl || activeProfile?.lastUrl || "");
-
-  // Match active account from available accounts list if present
-  const activeAccount = availableAccounts.find(
-    (a) => a.accountId === activeProfile?.accountBinding?.accountId
-  );
-  const activeAccountEmail = activeProfile?.accountBinding?.email || activeAccount?.email || null;
-  const activeAccountHasPassword = activeAccount?.hasPassword ?? false;
 
   return (
     <div className="browser-page-layout">
-      {/* Top Embedded Browser View Area (when active) */}
-      <div className="browser-viewport-card card">
-        <div className="browser-toolbar">
-          <div className="nav-controls">
-            <button
-              type="button"
-              className="browser-btn"
-              disabled={!activeBrowserId || !viewState?.canGoBack}
-              onClick={() => void window.client.invoke({ type: "browserGoBack" })}
-              title="Quay lại"
-            >
-              ◀
-            </button>
-            <button
-              type="button"
-              className="browser-btn"
-              disabled={!activeBrowserId || !viewState?.canGoForward}
-              onClick={() => void window.client.invoke({ type: "browserGoForward" })}
-              title="Tiếp theo"
-            >
-              ▶
-            </button>
-            <button
-              type="button"
-              className="browser-btn"
-              disabled={!activeBrowserId}
-              onClick={() => void window.client.invoke({ type: "browserReload" })}
-              title="Tải lại"
-            >
-              🔄
-            </button>
-          </div>
-
-          <form className="address-bar-form" onSubmit={handleNavigate}>
-            <span className="address-protocol-badge">
-              {addressInput.startsWith("https://") ? "🔒 HTTPS" : "🌐 URL"}
-            </span>
-            <input
-              type="text"
-              className="address-input"
-              placeholder="Nhập địa chỉ URL..."
-              value={addressInput}
-              disabled={!activeBrowserId}
-              onChange={(e) => setAddressInput(e.target.value)}
-            />
-            {viewState?.isLoading && <span className="loading-spinner">⌛</span>}
-            <button
-              type="submit"
-              className="browser-btn go-btn"
-              disabled={!activeBrowserId || !addressInput.trim()}
-            >
-              Truy cập
-            </button>
-          </form>
-
-          {activeBrowserId && (
-            <button
-              type="button"
-              className="btn btn-secondary stop-browser-btn"
-              onClick={handleStop}
-              disabled={actionLoading}
-              title="Đóng trình duyệt hiện tại và flush cookies/session data"
-            >
-              ⏹ Dừng Browser
-            </button>
-          )}
-        </div>
-
-        {activeProfile && (
-          <div className="browser-info-bar">
-            <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-              <span>
-                Browser: <strong>{activeProfile.name}</strong>
-              </span>
-
-              {/* Website Tag auto-detected from URL */}
-              <span className="signal-pill" style={{ background: "#1e293b", color: "#38bdf8" }}>
-                🌐 Site: {currentWebsiteTag}
-              </span>
-
-              {/* Linked Account info */}
-              {activeProfile.accountBinding?.accountId ? (
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ color: "#60a5fa" }}>
-                    👤 Account: <strong>{activeProfile.accountBinding.accountName || activeProfile.accountBinding.accountId.slice(0, 8)}</strong>
-                    {activeAccountEmail && (
-                      <span style={{ color: "#94a3b8", marginLeft: 4 }}>({activeAccountEmail})</span>
-                    )}
-                  </span>
-
-                  {/* Credentials buttons */}
-                  {activeAccountEmail && (
-                    <button
-                      type="button"
-                      className="link-action-btn"
-                      onClick={() => void handleCopyEmail(activeAccountEmail)}
-                      title="Copy email vào clipboard để đăng nhập"
-                      style={{ background: "#1e293b", padding: "2px 8px", borderRadius: 4 }}
-                    >
-                      📋 Copy Email
-                    </button>
-                  )}
-
-                  <button
-                    type="button"
-                    className="link-action-btn"
-                    onClick={handleCopyPassword}
-                    disabled={!activeAccountHasPassword}
-                    title={activeAccountHasPassword ? "Copy mật khẩu vào clipboard" : "Chưa lưu mật khẩu trên SEO-OPS"}
-                    style={{
-                      background: activeAccountHasPassword ? "#1e293b" : "#0f172a",
-                      color: activeAccountHasPassword ? "#cbd5e1" : "#64748b",
-                      padding: "2px 8px",
-                      borderRadius: 4,
-                    }}
-                  >
-                    🔑 {activeAccountHasPassword ? "Copy Password" : "Chưa lưu mật khẩu"}
-                  </button>
-                </div>
-              ) : (
-                <span style={{ color: "#f87171" }}>⚠️ Chưa liên kết Account</span>
-              )}
-            </div>
-
-            <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-              {activeProfile.sessionSignal?.status === "present" ? (
-                <span style={{ color: "#34d399", fontWeight: 600 }}>● Có tín hiệu phiên</span>
-              ) : activeProfile.sessionSignal?.status === "absent" ? (
-                <span style={{ color: "#fbbf24" }}>○ Không có cookie</span>
-              ) : (
-                <span style={{ color: "#94a3b8" }}>Tín hiệu: Chưa kiểm tra</span>
-              )}
-              <span className="mono-subtle">Partition: {activeProfile.partition}</span>
-            </div>
-          </div>
-        )}
-
-        {/* This div anchors the native WebContentsView inside Electron */}
-        <div
-          ref={containerRef}
-          className="browser-native-container"
-          style={{ height: activeBrowserId ? 380 : 180 }}
-        >
-          {!activeBrowserId && (
-            <div className="browser-empty-placeholder">
-              <div style={{ fontSize: 32, marginBottom: 8 }}>🌐</div>
-              <div style={{ fontWeight: 600, color: "#cbd5e1", marginBottom: 4 }}>
-                Chưa có Browser nào đang mở
-              </div>
-              <div style={{ color: "#64748b", maxWidth: 460, fontSize: 12 }}>
-                Quy trình Account-First: Chọn một Account từ SEO-OPS để tự động tạo Browser và mở website đích. Mỗi thiết bị chỉ chạy tối đa 1 Browser tại một thời điểm.
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-
       {/* Profile Management Section */}
       <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -663,15 +420,25 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
 
                   <div className="profile-actions" style={{ marginTop: 6 }}>
                     {isRunning ? (
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        style={{ padding: "4px 10px", fontSize: 11 }}
-                        onClick={handleStop}
-                        disabled={actionLoading}
-                      >
-                        ⏹ Dừng
-                      </button>
+                      <>
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          style={{ padding: "4px 10px", fontSize: 11 }}
+                          onClick={() => onOpenBrowser?.(p.browserId)}
+                        >
+                          💻 Đến Browser
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          style={{ padding: "4px 10px", fontSize: 11 }}
+                          onClick={handleStop}
+                          disabled={actionLoading}
+                        >
+                          ⏹ Dừng
+                        </button>
+                      </>
                     ) : (
                       <button
                         type="button"
@@ -776,7 +543,10 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
                     const existingProfile = snapshot?.profiles.find(
                       (p) => p.accountBinding?.accountId === acc.accountId
                     );
-                    const isCurrentBinding = Boolean(modalTargetProfile && modalTargetProfile.accountBinding?.accountId === acc.accountId);
+                    const isCurrentBinding = Boolean(
+                      modalTargetProfile &&
+                      modalTargetProfile.accountBinding?.accountId === acc.accountId
+                    );
 
                     return (
                       <div

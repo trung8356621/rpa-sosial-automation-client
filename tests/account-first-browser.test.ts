@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ProfileManager } from "../src/main/browser/profile-manager.js";
-import { resolveInitialUrl, detectBrowserTagFromUrl } from "../src/main/browser/url-resolver.js";
+import { resolveInitialUrl, detectBrowserTagFromUrl, isDomainMatchingAccount } from "../src/main/browser/url-resolver.js";
 import { sanitizeProfilesForSync } from "../src/main/browser/browser-sync-service.js";
 import { sanitizeLog } from "../src/main/main-error-log.js";
 import type { AccountInfo } from "../src/shared/contracts.js";
@@ -53,6 +53,7 @@ test("B. Account thiếu Email bị từ chối", async () => {
           displayName: "No Email Account",
           platform: "facebook",
           email: null,
+          username: null,
           identityLabel: null,
           verified: false,
         }),
@@ -66,6 +67,7 @@ test("B. Account thiếu Email bị từ chối", async () => {
           displayName: "Whitespace Email Account",
           platform: "facebook",
           email: "   ",
+          username: null,
           identityLabel: null,
           verified: false,
         }),
@@ -329,4 +331,83 @@ test("L. Không lộ Password trong API list, Profile JSON hoặc logs", async (
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
+});
+
+test("M. isDomainMatchingAccount checks domain vs account platform / siteUrl", () => {
+  // WordPress with siteUrl
+  assert.equal(
+    isDomainMatchingAccount("wordpress", "https://mayhopphat.com/wp-login.php", "https://mayhopphat.com/wp-admin"),
+    true
+  );
+  assert.equal(
+    isDomainMatchingAccount("wordpress", "https://mayhopphat.com/wp-login.php", "https://facebook.com"),
+    false
+  );
+
+  // Facebook
+  assert.equal(
+    isDomainMatchingAccount("facebook", undefined, "https://www.facebook.com/groups/123"),
+    true
+  );
+  assert.equal(
+    isDomainMatchingAccount("facebook", undefined, "https://m.facebook.com"),
+    true
+  );
+  assert.equal(
+    isDomainMatchingAccount("facebook", undefined, "https://google.com"),
+    false
+  );
+
+  // Threads
+  assert.equal(
+    isDomainMatchingAccount("threads", undefined, "https://www.threads.net"),
+    true
+  );
+  assert.equal(
+    isDomainMatchingAccount("threads", undefined, "https://threads.com"),
+    false
+  );
+});
+
+test("N. bindAccount updates profile platform when passed", async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "client-test-n-"));
+  try {
+    const pm = new ProfileManager(tmpDir);
+    await pm.initialize();
+
+    // Create a profile originally on facebook
+    const created = await pm.createForAccount({
+      accountId: "acc-old-fb",
+      displayName: "Old FB Profile",
+      platform: "facebook",
+      email: "fb@meta.com",
+      username: "fb_user",
+      identityLabel: null,
+      verified: true,
+    });
+    assert.equal(created.profile.platform, "facebook");
+
+    // Rebind to a WordPress account with platform passed
+    const updated = await pm.bindAccount(
+      created.profile.browserId,
+      "acc-new-wp",
+      "test WP",
+      "wp_user@mayhopphat.com",
+      "https://mayhopphat.com/wp-login.php",
+      "wordpress"
+    );
+
+    assert.equal(updated.platform, "wordpress", "Platform should update to wordpress");
+    assert.equal(updated.accountBinding?.accountId, "acc-new-wp");
+    assert.equal(updated.accountBinding?.siteUrl, "https://mayhopphat.com/wp-login.php");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("O. detectBrowserTagFromUrl extracts proper tags without altering account", () => {
+  assert.equal(detectBrowserTagFromUrl("https://mayhopphat.com/wp-login.php"), "mayhopphat.com");
+  assert.equal(detectBrowserTagFromUrl("https://sub.domain.com/path"), "sub.domain.com");
+  assert.equal(detectBrowserTagFromUrl("https://www.instagram.com"), "instagram");
+  assert.equal(detectBrowserTagFromUrl("about:blank"), "unknown");
 });

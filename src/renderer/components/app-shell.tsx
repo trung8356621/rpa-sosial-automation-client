@@ -3,8 +3,9 @@ import type { ConnectionState } from "../../shared/contracts.js";
 import { DeviceStatusPanel } from "./device-status-panel.js";
 import { ConnectionSettingsPanel } from "./connection-settings-panel.js";
 import { BrowserProfilesPanel } from "./browser-profiles-panel.js";
+import { BrowserWorkspacePanel } from "./browser-workspace-panel.js";
 
-type Tab = "status" | "browser" | "settings" | "logs";
+type Tab = "profiles" | "browser" | "status" | "settings" | "logs";
 
 interface LogEntry {
   time: string;
@@ -14,7 +15,7 @@ interface LogEntry {
 
 export function AppShell() {
   const [state, setState] = useState<ConnectionState | null>(null);
-  const [activeTab, setActiveTab] = useState<Tab>("browser");
+  const [activeTab, setActiveTab] = useState<Tab>("profiles");
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -96,10 +97,17 @@ export function AppShell() {
         <aside className="nav-sidebar">
           <button
             type="button"
+            className={`nav-item ${activeTab === "profiles" ? "active" : ""}`}
+            onClick={() => setActiveTab("profiles")}
+          >
+            🌐 Browser Profiles
+          </button>
+          <button
+            type="button"
             className={`nav-item ${activeTab === "browser" ? "active" : ""}`}
             onClick={() => setActiveTab("browser")}
           >
-            🌐 Browser Profiles
+            💻 Browser
           </button>
           <button
             type="button"
@@ -124,10 +132,25 @@ export function AppShell() {
           </button>
         </aside>
 
-        <main className="main-content">
-          <div style={{ display: activeTab === "browser" ? "block" : "none" }}>
+        <main className={`main-content ${activeTab === "browser" ? "browser-active" : ""}`}>
+          <div style={{ display: activeTab === "profiles" ? "block" : "none" }}>
             <BrowserProfilesPanel
+              onNotify={showNotification}
+              onOpenBrowser={(_browserId) => setActiveTab("browser")}
+            />
+          </div>
+
+          <div
+            style={{
+              display: activeTab === "browser" ? "flex" : "none",
+              flexDirection: "column",
+              height: "100%",
+              width: "100%",
+            }}
+          >
+            <BrowserWorkspacePanel
               isActiveTab={activeTab === "browser"}
+              onNavigateToProfiles={() => setActiveTab("profiles")}
               onNotify={showNotification}
             />
           </div>

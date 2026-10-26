@@ -781,3 +781,147 @@ body {
   border-radius: 4px;
   font-weight: 600;
 }
+
+
+/* Browser Workspace (Dedicated Page) */
+.main-content.browser-active {
+  padding: 0;
+  overflow: hidden;
+  gap: 0;
+  height: 100%;
+}
+
+.browser-workspace-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: #090e18;
+}
+
+.browser-workspace-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #111a2e;
+  border-bottom: 1px solid #1e293b;
+  flex-shrink: 0;
+}
+
+.back-profiles-btn {
+  font-weight: 600;
+  color: #38bdf8;
+  background: #1e293b;
+  border: 1px solid #0284c7;
+}
+
+.back-profiles-btn:hover {
+  background: #0369a1;
+  color: #fff;
+}
+
+.browser-workspace-subbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px;
+  background: #0f172a;
+  border-bottom: 1px solid #1e293b;
+  font-size: 11px;
+  color: #94a3b8;
+  flex-shrink: 0;
+}
+
+.browser-workspace-viewport {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  position: relative;
+  background: #050811;
+  overflow: hidden;
+}
+
+.browser-workspace-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  text-align: center;
+  padding: 40px;
+}
+
+.browser-error-banner {
+  background: rgba(239, 68, 68, 0.15);
+  border-bottom: 1px solid rgba(239, 68, 68, 0.3);
+  color: #f87171;
+  padding: 6px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.site-tag-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #1e293b;
+  color: #38bdf8;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.account-tag-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.warning-badge {
+  display: inline-flex;
+  align-items: center;
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.credential-btn {
+  background: #1e293b;
+  color: #cbd5e1;
+  border: 1px solid #334155;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.credential-btn:hover:not(:disabled) {
+  background: #334155;
+  color: #fff;
+}
+
+.credential-btn.disabled,
+.credential-btn:disabled {
+  background: #0f172a;
+  color: #64748b;
+  border-color: #1e293b;
+  cursor: not-allowed;
+  opacity: 0.6;
+}

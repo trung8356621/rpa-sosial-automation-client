@@ -90,6 +90,7 @@ export interface BrowserViewState {
   canGoBack: boolean;
   canGoForward: boolean;
   visible: boolean;
+  lastError?: string | null;
 }
 
 export interface BrowserStateSnapshot {
@@ -119,7 +120,7 @@ export type ClientCommand =
   | { type: "setBrowserViewBounds"; bounds: { x: number; y: number; width: number; height: number } }
   | { type: "setBrowserViewVisible"; visible: boolean }
   | { type: "getAccounts"; platform?: string }
-  | { type: "bindAccount"; browserId: string; accountId: string; accountName?: string; email?: string | null; siteUrl?: string | null }
+  | { type: "bindAccount"; browserId: string; accountId: string; accountName?: string; platform?: string; email?: string | null; siteUrl?: string | null }
   | { type: "unbindAccount"; browserId: string }
   | { type: "checkSessionSignal"; browserId: string }
   | { type: "copyToClipboard"; text: string };
@@ -144,6 +145,9 @@ export function detectBrowserTagFromUrl(url: string): string {
   try {
     const parsed = new URL(url);
     const host = parsed.hostname.toLowerCase();
+    if (!host) {
+      return "unknown";
+    }
     if (host.includes("facebook.com") || host.includes("fb.com")) {
       return "facebook";
     }
@@ -162,5 +166,56 @@ export function detectBrowserTagFromUrl(url: string): string {
     return host.replace(/^www\./, "");
   } catch {
     return "unknown";
+  }
+}
+
+export function isDomainMatchingAccount(
+  accountPlatform: string,
+  accountSiteUrl?: string | null,
+  currentUrl?: string | null
+): boolean {
+  if (!currentUrl || !currentUrl.trim()) {
+    return true; // Not navigated yet
+  }
+
+  try {
+    const currentHost = new URL(currentUrl).hostname.toLowerCase();
+    const normPlatform = (accountPlatform || "").toLowerCase().trim();
+
+    if (normPlatform === "facebook" || normPlatform === "fb") {
+      return currentHost === "facebook.com" || currentHost.endsWith(".facebook.com");
+    }
+    if (normPlatform === "threads") {
+      return currentHost === "threads.net" || currentHost.endsWith(".threads.net");
+    }
+    if (normPlatform === "instagram" || normPlatform === "ig") {
+      return currentHost === "instagram.com" || currentHost.endsWith(".instagram.com");
+    }
+    if (normPlatform === "x" || normPlatform === "twitter") {
+      return (
+        currentHost === "x.com" ||
+        currentHost.endsWith(".x.com") ||
+        currentHost === "twitter.com" ||
+        currentHost.endsWith(".twitter.com")
+      );
+    }
+    if (normPlatform === "tiktok") {
+      return currentHost === "tiktok.com" || currentHost.endsWith(".tiktok.com");
+    }
+
+    if (accountSiteUrl && accountSiteUrl.trim()) {
+      try {
+        let cleanSite = accountSiteUrl.trim();
+        if (!/^https?:\/\//i.test(cleanSite)) cleanSite = `https://${cleanSite}`;
+        const targetHost = new URL(cleanSite).hostname.toLowerCase();
+        return currentHost === targetHost || currentHost.endsWith(`.${targetHost}`);
+      } catch {
+        // Fall through
+      }
+    }
+
+    return true;
+  } catch {
+    return true;
   }
 }

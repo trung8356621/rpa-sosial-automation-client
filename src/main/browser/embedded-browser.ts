@@ -2,7 +2,7 @@ import { WebContentsView, session, type BrowserWindow } from "electron";
 import type { BrowserProfile, BrowserViewState, SessionSignal } from "../../shared/contracts.js";
 import type { ProfileManager } from "./profile-manager.js";
 import type { BrowserSyncService } from "./browser-sync-service.js";
-import { resolveInitialUrl } from "./url-resolver.js";
+import { resolveInitialUrl, isDomainMatchingAccount } from "./url-resolver.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
 
 export class EmbeddedBrowser {
@@ -11,6 +11,7 @@ export class EmbeddedBrowser {
   private currentUrl = "";
   private isLoading = false;
   private visible = false;
+  private lastError: string | null = null;
   private bounds = { x: 260, y: 120, width: 680, height: 560 };
   private stateListeners = new Set<(state: BrowserViewState) => void>();
 
@@ -54,6 +55,7 @@ export class EmbeddedBrowser {
       canGoBack: Boolean(wc?.navigationHistory?.canGoBack ? wc.navigationHistory.canGoBack() : wc?.canGoBack()),
       canGoForward: Boolean(wc?.navigationHistory?.canGoForward ? wc.navigationHistory.canGoForward() : wc?.canGoForward()),
       visible: this.visible,
+      lastError: this.lastError,
     };
   }
 
@@ -101,14 +103,14 @@ export class EmbeddedBrowser {
       throw new Error("Browser Profile chưa được liên kết với Account SEO-OPS. Vui lòng liên kết Account trước.");
     }
 
-    // Single active browser constraint: Close current if open
+    // Single active browser constraint: Close current if open for a different profile
     if (this.view && this.activeBrowserId !== browserId) {
       await this.stop();
     }
 
     if (this.view && this.activeBrowserId === browserId) {
-      // Already running
-      if (initialUrl) {
+      // Already running: do not reload or recreate WebContentsView
+      if (initialUrl && initialUrl !== this.currentUrl) {
         await this.navigate(initialUrl);
       }
       this.setVisible(true);
@@ -133,6 +135,7 @@ export class EmbeddedBrowser {
 
     this.view = view;
     this.activeBrowserId = browserId;
+    this.lastError = null;
     await this.profileManager.setStatus(browserId, "running");
 
     const wc = view.webContents;
@@ -161,9 +164,24 @@ export class EmbeddedBrowser {
       this.notify();
     });
 
+    // Handle real navigation failure (e.g. DNS, connection refused)
+    // ERR_ABORTED (-3) is expected on redirects/superseded loads and strictly ignored
+    wc.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame) return;
+      if (errorCode === -3) {
+        // Navigation was aborted/redirected, normal in Chromium
+        return;
+      }
+      this.isLoading = false;
+      this.lastError = `${errorDescription} (${errorCode}) khi tải ${validatedURL}`;
+      logClientError("Page load failed", { errorCode, errorDescription, validatedURL });
+      this.notify();
+    });
+
     const updateUrl = (url: string) => {
       if (/^https?:\/\//.test(url)) {
         this.currentUrl = url;
+        this.lastError = null;
         void this.profileManager.recordUrl(browserId, url);
         void this.checkSessionSignal(browserId);
         this.notify();
@@ -228,6 +246,7 @@ export class EmbeddedBrowser {
     this.currentUrl = "";
     this.isLoading = false;
     this.visible = false;
+    this.lastError = null;
 
     if (stoppingId) {
       await this.profileManager.setStatus(stoppingId, "stopped");
@@ -254,11 +273,40 @@ export class EmbeddedBrowser {
       if (!["http:", "https:"].includes(parsed.protocol)) {
         throw new Error("Chỉ chấp nhận URL HTTP/HTTPS.");
       }
+
+      // Avoid racing duplicate loadURL if already navigating to this exact URL
+      if (this.currentUrl === parsed.href && this.isLoading) {
+        return;
+      }
+
       this.currentUrl = parsed.href;
+      this.lastError = null;
       this.notify();
-      await this.view.webContents.loadURL(parsed.href);
-    } catch (err) {
-      logClientError("Navigate failed", err);
+
+      try {
+        await this.view.webContents.loadURL(parsed.href);
+      } catch (err: unknown) {
+        const anyErr = err as { code?: string; errno?: number; message?: string };
+        const errMsg = String(anyErr?.message || "");
+        if (
+          anyErr?.code === "ERR_ABORTED" ||
+          anyErr?.errno === -3 ||
+          errMsg.includes("ERR_ABORTED") ||
+          errMsg.includes("-3")
+        ) {
+          // Navigation was aborted (e.g. redirected or superseded), which is expected in Chromium
+          return;
+        }
+        this.lastError = errMsg;
+        this.notify();
+        logClientError("Navigate failed", err);
+        throw err;
+      }
+    } catch (err: unknown) {
+      const errMsg = String((err as { message?: string })?.message || "");
+      if (errMsg.includes("ERR_ABORTED") || errMsg.includes("-3")) {
+        return;
+      }
       throw err;
     }
   }
@@ -267,6 +315,7 @@ export class EmbeddedBrowser {
    * E5.2: Detect session presence signal (e.g. c_user cookie on Facebook).
    * Strict security rule: Only checks presence (true/false).
    * NEVER saves, logs, displays, or transmits cookie value.
+   * Requirement 5: Do NOT assign session signal of unrelated website to current account.
    */
   async checkSessionSignal(browserId?: string): Promise<SessionSignal> {
     const targetId = browserId || this.activeBrowserId;
@@ -280,6 +329,23 @@ export class EmbeddedBrowser {
     }
 
     const normPlatform = (profile.platform || "").toLowerCase();
+
+    // Check if the current website domain matches the bound Account
+    const matchesAccount = isDomainMatchingAccount(
+      normPlatform,
+      profile.accountBinding?.siteUrl,
+      this.currentUrl
+    );
+
+    if (this.currentUrl && !matchesAccount) {
+      logClientEvent("Current website domain does not match account, skipping session signal update", {
+        browserId: targetId,
+        currentUrl: this.currentUrl,
+        accountPlatform: normPlatform,
+      });
+      return profile.sessionSignal || { status: "unknown", checkedAt: null, method: null };
+    }
+
     if (normPlatform === "facebook" || normPlatform === "fb") {
       try {
         let hasCUser = false;

@@ -272,7 +272,8 @@ async function bootstrap() {
           cmd.accountId,
           cmd.accountName,
           cmd.email,
-          cmd.siteUrl
+          cmd.siteUrl,
+          cmd.platform
         );
         void syncService?.syncAll();
         broadcastBrowserState();

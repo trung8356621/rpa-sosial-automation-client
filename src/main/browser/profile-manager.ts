@@ -192,7 +192,8 @@ export class ProfileManager {
     accountId: string,
     accountName?: string,
     email?: string | null,
-    siteUrl?: string | null
+    siteUrl?: string | null,
+    platform?: string
   ): Promise<BrowserProfile> {
     const profile = this.get(browserId);
     if (!profile) {
@@ -202,8 +203,12 @@ export class ProfileManager {
     const prevAccountId = profile.accountBinding?.accountId ?? null;
     const isAccountSwitch = prevAccountId !== null && prevAccountId !== accountId;
 
+    if (platform && platform.trim()) {
+      profile.platform = platform.toLowerCase().trim();
+    }
+
     if (isAccountSwitch) {
-      // E5.3 & Requirement 6: Reset execution confirmation and session signal when switching account
+      // Reset execution confirmation and session signal when switching account
       profile.executionConfirmation = {
         status: "not_run",
         firstRunAt: null,
@@ -236,14 +241,14 @@ export class ProfileManager {
     profile.accountBinding = {
       accountId,
       boundAt: new Date().toISOString(),
-      accountName,
+      accountName: accountName ?? profile.accountBinding?.accountName,
       email: email ?? profile.accountBinding?.email ?? null,
       siteUrl: siteUrl ?? profile.accountBinding?.siteUrl ?? null,
     };
     profile.updatedAt = new Date().toISOString();
 
     await this.save();
-    logClientEvent("Bound account to browser profile", { browserId, accountId, accountName });
+    logClientEvent("Bound account to browser profile", { browserId, accountId, accountName, platform });
     return profile;
   }
 
