@@ -100,6 +100,9 @@ export class BrowserSyncService {
           platform: String(a.platform),
           displayName: String(a.display_name),
           username: a.username ? String(a.username) : null,
+          email: a.email ? String(a.email) : null,
+          siteUrl: a.site_url ? String(a.site_url) : null,
+          hasPassword: Boolean(a.has_password),
           identityLabel: a.identity_label ? String(a.identity_label) : null,
           verified: Boolean(a.verified),
         }));

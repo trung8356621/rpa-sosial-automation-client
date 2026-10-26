@@ -40,6 +40,9 @@ export interface AccountInfo {
   platform: string;
   displayName: string;
   username: string | null;
+  email: string | null;
+  siteUrl?: string | null;
+  hasPassword?: boolean;
   identityLabel: string | null;
   verified: boolean;
 }
@@ -48,6 +51,8 @@ export interface AccountBinding {
   accountId: string | null;
   boundAt: string | null;
   accountName?: string;
+  email?: string | null;
+  siteUrl?: string | null;
 }
 
 export interface SessionSignal {
@@ -101,7 +106,8 @@ export type ClientCommand =
   | { type: "setDisplayName"; displayName: string }
   | { type: "triggerHeartbeat" }
   | { type: "getBrowserState" }
-  | { type: "createBrowserProfile"; name: string; platform?: string }
+  | { type: "createBrowserProfile"; name: string; platform?: string; account?: AccountInfo }
+  | { type: "createBrowserForAccount"; account: AccountInfo }
   | { type: "renameBrowserProfile"; browserId: string; name: string }
   | { type: "deleteBrowserProfile"; browserId: string }
   | { type: "openBrowser"; browserId: string; initialUrl?: string }
@@ -113,9 +119,10 @@ export type ClientCommand =
   | { type: "setBrowserViewBounds"; bounds: { x: number; y: number; width: number; height: number } }
   | { type: "setBrowserViewVisible"; visible: boolean }
   | { type: "getAccounts"; platform?: string }
-  | { type: "bindAccount"; browserId: string; accountId: string; accountName?: string }
+  | { type: "bindAccount"; browserId: string; accountId: string; accountName?: string; email?: string | null; siteUrl?: string | null }
   | { type: "unbindAccount"; browserId: string }
-  | { type: "checkSessionSignal"; browserId: string };
+  | { type: "checkSessionSignal"; browserId: string }
+  | { type: "copyToClipboard"; text: string };
 
 export interface ClientApi {
   invoke: <T = unknown>(command: ClientCommand) => Promise<T>;
@@ -127,5 +134,33 @@ export interface ClientApi {
 declare global {
   interface Window {
     client: ClientApi;
+  }
+}
+
+export function detectBrowserTagFromUrl(url: string): string {
+  if (!url || typeof url !== "string") {
+    return "unknown";
+  }
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    if (host.includes("facebook.com") || host.includes("fb.com")) {
+      return "facebook";
+    }
+    if (host.includes("threads.net")) {
+      return "threads";
+    }
+    if (host.includes("instagram.com")) {
+      return "instagram";
+    }
+    if (host.includes("x.com") || host.includes("twitter.com")) {
+      return "x";
+    }
+    if (host.includes("tiktok.com")) {
+      return "tiktok";
+    }
+    return host.replace(/^www\./, "");
+  } catch {
+    return "unknown";
   }
 }

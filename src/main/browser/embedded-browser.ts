@@ -2,6 +2,7 @@ import { WebContentsView, session, type BrowserWindow } from "electron";
 import type { BrowserProfile, BrowserViewState, SessionSignal } from "../../shared/contracts.js";
 import type { ProfileManager } from "./profile-manager.js";
 import type { BrowserSyncService } from "./browser-sync-service.js";
+import { resolveInitialUrl } from "./url-resolver.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
 
 export class EmbeddedBrowser {
@@ -17,7 +18,15 @@ export class EmbeddedBrowser {
     private readonly window: BrowserWindow,
     private readonly profileManager: ProfileManager,
     private readonly syncService: BrowserSyncService
-  ) {}
+  ) {
+    // When account changes on a profile, reset partition storage to avoid cross-account session pollution
+    this.profileManager.setSessionResetCallback(async (browserId, partition) => {
+      if (this.activeBrowserId === browserId) {
+        await this.stop();
+      }
+      await this.clearPartitionStorage(partition);
+    });
+  }
 
   onViewStateChange(listener: (state: BrowserViewState) => void): () => void {
     this.stateListeners.add(listener);
@@ -71,10 +80,25 @@ export class EmbeddedBrowser {
     this.notify();
   }
 
+  async clearPartitionStorage(partition: string): Promise<void> {
+    try {
+      const sess = session.fromPartition(partition);
+      await sess.clearStorageData();
+      logClientEvent("Cleared partition storage and cookies", { partition });
+    } catch (err) {
+      logClientError("Error clearing partition storage", err);
+    }
+  }
+
   async open(browserId: string, initialUrl?: string): Promise<void> {
     const profile = this.profileManager.get(browserId);
     if (!profile) {
       throw new Error(`Profile ${browserId} không tồn tại.`);
+    }
+
+    // Requirement 6: Profile without bound account cannot run without binding
+    if (!profile.accountBinding?.accountId) {
+      throw new Error("Browser Profile chưa được liên kết với Account SEO-OPS. Vui lòng liên kết Account trước.");
     }
 
     // Single active browser constraint: Close current if open
@@ -154,8 +178,12 @@ export class EmbeddedBrowser {
     view.setBounds(this.bounds);
     this.setVisible(true);
 
-    // Initial navigation
-    const targetUrl = initialUrl || profile.lastUrl || "https://www.facebook.com";
+    // Initial navigation: automatically determine website URL from platform and site_url
+    let targetUrl = initialUrl || profile.lastUrl;
+    if (!targetUrl) {
+      targetUrl = resolveInitialUrl(profile.platform, profile.accountBinding?.siteUrl);
+    }
+
     await this.navigate(targetUrl).catch((err) => {
       logClientError("Initial browser navigation failed", err);
     });
@@ -251,7 +279,8 @@ export class EmbeddedBrowser {
       return { status: "unknown", checkedAt: null, method: null };
     }
 
-    if (profile.platform.toLowerCase() === "facebook") {
+    const normPlatform = (profile.platform || "").toLowerCase();
+    if (normPlatform === "facebook" || normPlatform === "fb") {
       try {
         let hasCUser = false;
         if (this.view && this.activeBrowserId === targetId) {
@@ -284,9 +313,10 @@ export class EmbeddedBrowser {
     }
 
     // Generic fallback for other platforms / websites
-    const targetUrl = (this.activeBrowserId === targetId && this.currentUrl)
-      ? this.currentUrl
-      : profile.lastUrl || (profile.platform ? `https://${profile.platform}.com` : "");
+    const targetUrl =
+      this.activeBrowserId === targetId && this.currentUrl
+        ? this.currentUrl
+        : profile.lastUrl || profile.accountBinding?.siteUrl || "";
 
     if (targetUrl) {
       try {

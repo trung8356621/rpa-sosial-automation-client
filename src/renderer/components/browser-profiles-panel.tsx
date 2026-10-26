@@ -1,5 +1,10 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import type { BrowserProfile, BrowserStateSnapshot, AccountInfo } from "../../shared/contracts.js";
+import {
+  type BrowserProfile,
+  type BrowserStateSnapshot,
+  type AccountInfo,
+  detectBrowserTagFromUrl,
+} from "../../shared/contracts.js";
 
 interface BrowserProfilesPanelProps {
   onNotify?: (msg: string) => void;
@@ -8,16 +13,14 @@ interface BrowserProfilesPanelProps {
 
 export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesPanelProps) {
   const [snapshot, setSnapshot] = useState<BrowserStateSnapshot | null>(null);
-  const [creating, setCreating] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [newPlatform, setNewPlatform] = useState("facebook");
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [addressInput, setAddressInput] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
 
-  // E5: Account binding & signal state
-  const [bindingProfile, setBindingProfile] = useState<BrowserProfile | null>(null);
+  // Account-first selection state
+  const [showAccountModal, setShowAccountModal] = useState(false);
+  const [modalTargetProfile, setModalTargetProfile] = useState<BrowserProfile | null>(null);
   const [availableAccounts, setAvailableAccounts] = useState<AccountInfo[]>([]);
   const [loadingAccounts, setLoadingAccounts] = useState(false);
   const [checkingSignalId, setCheckingSignalId] = useState<string | null>(null);
@@ -96,26 +99,91 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
       });
       setAvailableAccounts(list);
     } catch (err) {
-      logClientErrorUI("Lỗi lấy danh sách account", err);
+      console.error("Lỗi lấy danh sách account", err);
     } finally {
       setLoadingAccounts(false);
     }
   };
 
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newName.trim()) return;
+  const openAccountPickerForNewBrowser = () => {
+    setModalTargetProfile(null);
+    setShowAccountModal(true);
+    void loadAccounts();
+  };
+
+  const openAccountPickerForExistingProfile = (profile: BrowserProfile) => {
+    setModalTargetProfile(profile);
+    setShowAccountModal(true);
+    void loadAccounts(profile.platform);
+  };
+
+  const handleSelectAccount = async (acc: AccountInfo) => {
+    if (!acc.email || !acc.email.trim()) {
+      alert("Account này thiếu Email. Vui lòng cập nhật email trên SEO-OPS trước khi tạo Browser.");
+      return;
+    }
+
     setActionLoading(true);
     try {
-      await window.client.invoke({
-        type: "createBrowserProfile",
-        name: newName.trim(),
-        platform: newPlatform,
-      });
-      setNewName("");
-      setCreating(false);
-      onNotify?.("Đã tạo Browser Profile mới");
-      await refreshState();
+      if (modalTargetProfile) {
+        // Binding or switching account for an existing profile
+        const prevAccountId = modalTargetProfile.accountBinding?.accountId;
+        if (prevAccountId && prevAccountId !== acc.accountId) {
+          const ok = window.confirm(
+            `Đổi sang Account "${acc.displayName}" sẽ reset phiên làm việc (cookies/session data) của Account cũ để đảm bảo không dùng nhầm session. Bạn có chắc chắn muốn đổi?`
+          );
+          if (!ok) {
+            setActionLoading(false);
+            return;
+          }
+        }
+
+        await window.client.invoke({
+          type: "bindAccount",
+          browserId: modalTargetProfile.browserId,
+          accountId: acc.accountId,
+          accountName: acc.displayName,
+          email: acc.email,
+          siteUrl: acc.siteUrl,
+        });
+
+        setShowAccountModal(false);
+        setModalTargetProfile(null);
+        onNotify?.(`Đã liên kết profile với account "${acc.displayName}"`);
+        await refreshState();
+      } else {
+        // Account-First: Create new browser profile from Account
+        // Check if an existing profile for this account already exists on device
+        const existingProfile = snapshot?.profiles.find(
+          (p) => p.accountBinding?.accountId === acc.accountId
+        );
+
+        if (existingProfile) {
+          setShowAccountModal(false);
+          onNotify?.(`Account đã có Browser Profile "${existingProfile.name}". Đang mở profile hiện có...`);
+          await window.client.invoke({
+            type: "openBrowser",
+            browserId: existingProfile.browserId,
+          });
+          await refreshState();
+          return;
+        }
+
+        const result = await window.client.invoke<{ profile: BrowserProfile; alreadyExists: boolean }>({
+          type: "createBrowserForAccount",
+          account: acc,
+        });
+
+        setShowAccountModal(false);
+        onNotify?.(`Đã tạo Browser Profile "${result.profile.name}". Đang tự mở website...`);
+
+        // Auto open browser for newly created profile
+        await window.client.invoke({
+          type: "openBrowser",
+          browserId: result.profile.browserId,
+        });
+        await refreshState();
+      }
     } catch (err) {
       alert((err as Error).message);
     } finally {
@@ -148,7 +216,9 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
       alert("Không thể xóa profile đang chạy. Hãy dừng trình duyệt trước.");
       return;
     }
-    const ok = window.confirm(`Bạn có chắc chắn muốn xóa profile "${profile.name}"?\n(Dữ liệu chromium không bị xóa, chỉ xóa đăng ký local và SEO-OPS)`);
+    const ok = window.confirm(
+      `Bạn có chắc chắn muốn xóa profile "${profile.name}"?\n(Dữ liệu Account trên SEO-OPS không bị ảnh hưởng, chỉ xóa profile local của máy này)`
+    );
     if (!ok) return;
 
     setActionLoading(true);
@@ -166,12 +236,18 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
     }
   };
 
-  const handleOpen = async (browserId: string) => {
+  const handleOpen = async (profile: BrowserProfile) => {
+    // If profile has no account bound, mandate selecting an account first
+    if (!profile.accountBinding?.accountId) {
+      openAccountPickerForExistingProfile(profile);
+      return;
+    }
+
     setActionLoading(true);
     try {
       await window.client.invoke({
         type: "openBrowser",
-        browserId,
+        browserId: profile.browserId,
       });
       onNotify?.("Đã mở trình duyệt");
       await refreshState();
@@ -210,44 +286,6 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
     }
   };
 
-  const handleBind = async (profile: BrowserProfile, acc: AccountInfo) => {
-    setActionLoading(true);
-    try {
-      await window.client.invoke({
-        type: "bindAccount",
-        browserId: profile.browserId,
-        accountId: acc.accountId,
-        accountName: acc.displayName,
-      });
-      setBindingProfile(null);
-      onNotify?.(`Đã liên kết profile với account "${acc.displayName}"`);
-      await refreshState();
-    } catch (err) {
-      alert((err as Error).message);
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleUnbind = async (profile: BrowserProfile) => {
-    const ok = window.confirm(`Bạn có chắc chắn muốn bỏ liên kết account khỏi profile "${profile.name}"?`);
-    if (!ok) return;
-
-    setActionLoading(true);
-    try {
-      await window.client.invoke({
-        type: "unbindAccount",
-        browserId: profile.browserId,
-      });
-      onNotify?.("Đã hủy liên kết account");
-      await refreshState();
-    } catch (err) {
-      alert((err as Error).message);
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
   const handleCheckSignal = async (profile: BrowserProfile) => {
     setCheckingSignalId(profile.browserId);
     try {
@@ -264,14 +302,38 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
     }
   };
 
-  const logClientErrorUI = (msg: string, err: unknown) => {
-    console.error(msg, err);
+  const handleCopyEmail = async (email: string) => {
+    try {
+      await window.client.invoke({ type: "copyToClipboard", text: email });
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(email);
+      }
+      onNotify?.(`Đã copy Email: ${email}`);
+    } catch {
+      alert(`Không thể copy email. Giá trị: ${email}`);
+    }
+  };
+
+  const handleCopyPassword = () => {
+    // Blocker notice per security guidelines:
+    // Shared Client API Key cannot securely authorize plaintext credential disclosure.
+    alert(
+      "Chưa thể copy mật khẩu từ xa: Cơ chế Client API Key dùng chung chưa hỗ trợ phân quyền giải mã mật khẩu an toàn. Vui lòng nhập mật khẩu trực tiếp bằng tay."
+    );
   };
 
   const profiles = snapshot?.profiles ?? [];
   const activeBrowserId = snapshot?.activeBrowserId;
   const activeProfile = profiles.find((p) => p.browserId === activeBrowserId);
   const viewState = snapshot?.viewState;
+  const currentWebsiteTag = detectBrowserTagFromUrl(viewState?.currentUrl || activeProfile?.lastUrl || "");
+
+  // Match active account from available accounts list if present
+  const activeAccount = availableAccounts.find(
+    (a) => a.accountId === activeProfile?.accountBinding?.accountId
+  );
+  const activeAccountEmail = activeProfile?.accountBinding?.email || activeAccount?.email || null;
+  const activeAccountHasPassword = activeAccount?.hasPassword ?? false;
 
   return (
     <div className="browser-page-layout">
@@ -315,7 +377,7 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
             <input
               type="text"
               className="address-input"
-              placeholder="Nhập địa chỉ URL (https://facebook.com)..."
+              placeholder="Nhập địa chỉ URL..."
               value={addressInput}
               disabled={!activeBrowserId}
               onChange={(e) => setAddressInput(e.target.value)}
@@ -345,16 +407,60 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
 
         {activeProfile && (
           <div className="browser-info-bar">
-            <div>
+            <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
               <span>
-                Đang mở: <strong>{activeProfile.name}</strong> ({activeProfile.platform})
+                Browser: <strong>{activeProfile.name}</strong>
               </span>
-              {activeProfile.accountBinding?.accountId && (
-                <span style={{ marginLeft: 12, color: "#60a5fa" }}>
-                  👤 Account: <strong>{activeProfile.accountBinding.accountName || activeProfile.accountBinding.accountId.slice(0, 8)}</strong>
-                </span>
+
+              {/* Website Tag auto-detected from URL */}
+              <span className="signal-pill" style={{ background: "#1e293b", color: "#38bdf8" }}>
+                🌐 Site: {currentWebsiteTag}
+              </span>
+
+              {/* Linked Account info */}
+              {activeProfile.accountBinding?.accountId ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ color: "#60a5fa" }}>
+                    👤 Account: <strong>{activeProfile.accountBinding.accountName || activeProfile.accountBinding.accountId.slice(0, 8)}</strong>
+                    {activeAccountEmail && (
+                      <span style={{ color: "#94a3b8", marginLeft: 4 }}>({activeAccountEmail})</span>
+                    )}
+                  </span>
+
+                  {/* Credentials buttons */}
+                  {activeAccountEmail && (
+                    <button
+                      type="button"
+                      className="link-action-btn"
+                      onClick={() => void handleCopyEmail(activeAccountEmail)}
+                      title="Copy email vào clipboard để đăng nhập"
+                      style={{ background: "#1e293b", padding: "2px 8px", borderRadius: 4 }}
+                    >
+                      📋 Copy Email
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    className="link-action-btn"
+                    onClick={handleCopyPassword}
+                    disabled={!activeAccountHasPassword}
+                    title={activeAccountHasPassword ? "Copy mật khẩu vào clipboard" : "Chưa lưu mật khẩu trên SEO-OPS"}
+                    style={{
+                      background: activeAccountHasPassword ? "#1e293b" : "#0f172a",
+                      color: activeAccountHasPassword ? "#cbd5e1" : "#64748b",
+                      padding: "2px 8px",
+                      borderRadius: 4,
+                    }}
+                  >
+                    🔑 {activeAccountHasPassword ? "Copy Password" : "Chưa lưu mật khẩu"}
+                  </button>
+                </div>
+              ) : (
+                <span style={{ color: "#f87171" }}>⚠️ Chưa liên kết Account</span>
               )}
             </div>
+
             <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
               {activeProfile.sessionSignal?.status === "present" ? (
                 <span style={{ color: "#34d399", fontWeight: 600 }}>● Có tín hiệu phiên</span>
@@ -380,8 +486,8 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
               <div style={{ fontWeight: 600, color: "#cbd5e1", marginBottom: 4 }}>
                 Chưa có Browser nào đang mở
               </div>
-              <div style={{ color: "#64748b", maxWidth: 440, fontSize: 12 }}>
-                Mỗi thiết bị chỉ mở tối đa 1 Browser tại một thời điểm. Chọn một Browser Profile bên dưới và nhấn "Mở Browser" để đăng nhập Facebook hoặc làm việc.
+              <div style={{ color: "#64748b", maxWidth: 460, fontSize: 12 }}>
+                Quy trình Account-First: Chọn một Account từ SEO-OPS để tự động tạo Browser và mở website đích. Mỗi thiết bị chỉ chạy tối đa 1 Browser tại một thời điểm.
               </div>
             </div>
           )}
@@ -392,66 +498,24 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
       <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
           <div>
-            <div className="card-title">Quản lý Browser Profiles ({profiles.length})</div>
+            <div className="card-title">Browser Profiles ({profiles.length})</div>
             <div className="card-desc">
-              Mỗi profile sở hữu session partition cô lập, liên kết một Account quản lý tại SEO-OPS và theo dõi tín hiệu đăng nhập Facebook.
+              Khởi tạo Browser trực tiếp từ Account SEO-OPS. Hệ thống tự động đặt tên, chọn nền tảng, thiết lập partition cô lập và mở website.
             </div>
           </div>
           <button
             type="button"
             className="btn btn-primary"
-            onClick={() => setCreating(true)}
-            disabled={creating}
+            onClick={openAccountPickerForNewBrowser}
+            disabled={actionLoading}
           >
-            + Tạo Profile Mới
+            + Mở Browser từ Account
           </button>
         </div>
 
-        {creating && (
-          <form className="create-profile-box" onSubmit={handleCreate}>
-            <div className="form-group" style={{ marginBottom: 0 }}>
-              <label className="form-label">Tên Profile</label>
-              <input
-                type="text"
-                className="form-input"
-                placeholder="VD: Facebook Marketing 01"
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                autoFocus
-              />
-            </div>
-            <div className="form-group" style={{ marginBottom: 0, width: 160 }}>
-              <label className="form-label">Nền tảng</label>
-              <select
-                className="form-input"
-                value={newPlatform}
-                onChange={(e) => setNewPlatform(e.target.value)}
-              >
-                <option value="facebook">Facebook</option>
-                <option value="threads">Threads</option>
-                <option value="instagram">Instagram</option>
-                <option value="general">Khác</option>
-              </select>
-            </div>
-            <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-              <button type="submit" className="btn btn-primary" disabled={actionLoading || !newName.trim()}>
-                Lưu
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => setCreating(false)}
-                disabled={actionLoading}
-              >
-                Hủy
-              </button>
-            </div>
-          </form>
-        )}
-
         {profiles.length === 0 ? (
           <div style={{ textAlign: "center", padding: "30px 20px", color: "#64748b" }}>
-            Chưa có Browser Profile nào. Nhấn "+ Tạo Profile Mới" để bắt đầu.
+            Chưa có Browser Profile nào trên máy này. Nhấn <strong>"+ Mở Browser từ Account"</strong> để chọn một tài khoản từ SEO-OPS.
           </div>
         ) : (
           <div className="profile-grid">
@@ -460,8 +524,10 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
               const isRenaming = renamingId === p.browserId;
               const boundAccount = p.accountBinding?.accountId;
               const boundName = p.accountBinding?.accountName;
+              const boundEmail = p.accountBinding?.email;
               const signalStatus = p.sessionSignal?.status || "unknown";
               const isCheckingSignal = checkingSignalId === p.browserId;
+              const detectedTag = detectBrowserTagFromUrl(p.lastUrl || "");
 
               return (
                 <div
@@ -504,6 +570,9 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
                       )}
                       <div className="profile-sub">
                         ID: <span className="mono-subtle">{p.browserId.slice(0, 8)}...</span> • {p.platform}
+                        {detectedTag !== "unknown" && (
+                          <span style={{ marginLeft: 6, color: "#38bdf8" }}>• {detectedTag}</span>
+                        )}
                       </div>
                     </div>
                     <span
@@ -517,58 +586,52 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
                     </span>
                   </div>
 
-                  {/* E5.1: Account Binding Row */}
+                  {/* Account Binding Row */}
                   <div className="profile-meta-row">
                     <span className="meta-label">Account SEO-OPS:</span>
                     {boundAccount ? (
                       <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                         <span className="account-tag" title={boundAccount}>
                           👤 {boundName || boundAccount.slice(0, 8)}
+                          {boundEmail && <span style={{ opacity: 0.8 }}> ({boundEmail})</span>}
                         </span>
                         <button
                           type="button"
                           className="link-action-btn"
-                          onClick={() => {
-                            setBindingProfile(p);
-                            void loadAccounts(p.platform);
-                          }}
+                          onClick={() => openAccountPickerForExistingProfile(p)}
                           disabled={actionLoading}
                         >
                           Đổi
                         </button>
-                        <button
-                          type="button"
-                          className="link-action-btn text-danger"
-                          onClick={() => void handleUnbind(p)}
-                          disabled={actionLoading}
-                        >
-                          Hủy
-                        </button>
                       </div>
                     ) : (
                       <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                        <span style={{ color: "#64748b", fontStyle: "italic", fontSize: 11 }}>Chưa liên kết</span>
+                        <span style={{ color: "#ef4444", fontSize: 11 }}>Chưa liên kết</span>
                         <button
                           type="button"
-                          className="link-action-btn"
-                          onClick={() => {
-                            setBindingProfile(p);
-                            void loadAccounts(p.platform);
-                          }}
+                          className="link-action-btn text-primary"
+                          onClick={() => openAccountPickerForExistingProfile(p)}
                           disabled={actionLoading}
                         >
-                          + Liên kết
+                          + Chọn Account
                         </button>
                       </div>
                     )}
                   </div>
 
-                  {/* E5.2: Session Signal Row */}
+                  {/* Session Signal Row */}
                   <div className="profile-meta-row">
                     <span className="meta-label">Tín hiệu Session:</span>
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                       {signalStatus === "present" ? (
-                        <span className="signal-pill present" title={p.sessionSignal?.method === "facebook_c_user_cookie" ? "Phát hiện cookie c_user" : "Phát hiện cookie phiên từ site"}>
+                        <span
+                          className="signal-pill present"
+                          title={
+                            p.sessionSignal?.method === "facebook_c_user_cookie"
+                              ? "Phát hiện cookie c_user"
+                              : "Phát hiện cookie phiên từ site"
+                          }
+                        >
                           ● Có tín hiệu phiên
                         </span>
                       ) : signalStatus === "absent" ? (
@@ -576,23 +639,21 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
                           ○ Không có cookie
                         </span>
                       ) : (
-                        <span className="signal-pill unknown">
-                          Chưa kiểm tra
-                        </span>
+                        <span className="signal-pill unknown">Chưa kiểm tra</span>
                       )}
                       <button
                         type="button"
                         className="link-action-btn"
                         onClick={() => void handleCheckSignal(p)}
                         disabled={actionLoading || isCheckingSignal}
-                        title="Kiểm tra lại cookie c_user"
+                        title="Kiểm tra lại tín hiệu cookie"
                       >
                         {isCheckingSignal ? "⌛" : "🔄"}
                       </button>
                     </div>
                   </div>
 
-                  {/* E5.3: Execution Confirmation Row */}
+                  {/* Execution Confirmation Row */}
                   <div className="profile-meta-row">
                     <span className="meta-label">Xác nhận chạy:</span>
                     <span style={{ color: "#94a3b8", fontSize: 11 }}>
@@ -616,7 +677,7 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
                         type="button"
                         className="btn btn-primary"
                         style={{ padding: "4px 10px", fontSize: 11 }}
-                        onClick={() => void handleOpen(p.browserId)}
+                        onClick={() => void handleOpen(p)}
                         disabled={actionLoading}
                       >
                         ▶ Mở Browser
@@ -645,7 +706,7 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
                       style={{ padding: "4px 8px", fontSize: 11, color: "#f87171" }}
                       onClick={() => void handleDelete(p)}
                       disabled={actionLoading || isRunning}
-                      title={isRunning ? "Cần dừng browser trước khi xóa" : "Xóa profile"}
+                      title={isRunning ? "Cần dừng browser trước khi xóa" : "Xóa profile (không xóa Account trên SEO-OPS)"}
                     >
                       🗑️
                     </button>
@@ -657,18 +718,23 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
         )}
       </div>
 
-      {/* E5.1: Modal Account Picker */}
-      {bindingProfile && (
+      {/* Account-First Modal: Account Picker */}
+      {showAccountModal && (
         <div className="modal-backdrop">
-          <div className="modal-box">
+          <div className="modal-box" style={{ maxWidth: 560 }}>
             <div className="modal-header">
               <div className="modal-title">
-                Liên kết Account cho: <strong>{bindingProfile.name}</strong>
+                {modalTargetProfile
+                  ? `Liên kết Account cho: ${modalTargetProfile.name}`
+                  : "Chọn Account từ SEO-OPS để tạo Browser"}
               </div>
               <button
                 type="button"
                 className="modal-close-btn"
-                onClick={() => setBindingProfile(null)}
+                onClick={() => {
+                  setShowAccountModal(false);
+                  setModalTargetProfile(null);
+                }}
               >
                 ✕
               </button>
@@ -676,7 +742,9 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
 
             <div className="modal-body">
               <p style={{ color: "#94a3b8", fontSize: 12, marginBottom: 12 }}>
-                Chọn một Account từ SEO-OPS để liên kết với Browser Profile này. Đổi sang Account khác sẽ tự động reset trạng thái xác nhận thực thi (Execution Confirmation).
+                {modalTargetProfile
+                  ? "Chọn Account để gán vào Browser Profile này. Đổi sang account khác sẽ tự động xóa session/cookies cũ để đảm bảo an toàn."
+                  : "Mỗi Browser gắn liền với một Account duy nhất trên SEO-OPS. Hãy chọn một Account đã cấu hình email để tự động tạo Browser và mở website."}
               </p>
 
               {loadingAccounts ? (
@@ -684,38 +752,98 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
                   Đang tải danh sách Account từ SEO-OPS...
                 </div>
               ) : availableAccounts.length === 0 ? (
-                <div style={{ textAlign: "center", padding: 24, color: "#64748b" }}>
-                  Không tìm thấy Account nào phù hợp trên SEO-OPS cho platform {bindingProfile.platform}.
+                <div
+                  style={{
+                    textAlign: "center",
+                    padding: "24px 16px",
+                    background: "#0f172a",
+                    borderRadius: 8,
+                    border: "1px dashed #334155",
+                  }}
+                >
+                  <div style={{ fontSize: 24, marginBottom: 8 }}>📋</div>
+                  <div style={{ fontWeight: 600, color: "#f1f5f9", marginBottom: 4 }}>
+                    Chưa có Account nào trên SEO-OPS
+                  </div>
+                  <div style={{ color: "#94a3b8", fontSize: 12, maxWidth: 380, margin: "0 auto 12px" }}>
+                    Vui lòng truy cập trang quản trị SEO-OPS để tạo Account với đầy đủ thông tin Email và Platform trước khi tạo Browser.
+                  </div>
                 </div>
               ) : (
                 <div className="account-list-container">
                   {availableAccounts.map((acc) => {
-                    const isCurrent = bindingProfile.accountBinding?.accountId === acc.accountId;
+                    const hasEmail = Boolean(acc.email && acc.email.trim());
+                    const existingProfile = snapshot?.profiles.find(
+                      (p) => p.accountBinding?.accountId === acc.accountId
+                    );
+                    const isCurrentBinding = Boolean(modalTargetProfile && modalTargetProfile.accountBinding?.accountId === acc.accountId);
+
                     return (
                       <div
                         key={acc.accountId}
-                        className={`account-list-item ${isCurrent ? "current" : ""}`}
-                        onClick={() => void handleBind(bindingProfile, acc)}
+                        className={`account-list-item ${isCurrentBinding ? "current" : ""} ${
+                          !hasEmail ? "disabled" : ""
+                        }`}
+                        style={{ opacity: hasEmail ? 1 : 0.6 }}
                       >
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontWeight: 600, color: "#f1f5f9" }}>
-                            {acc.displayName}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontWeight: 600, color: "#f1f5f9" }}>
+                              {acc.displayName}
+                            </span>
+                            <span className="mono-subtle" style={{ fontSize: 10 }}>
+                              {acc.platform}
+                            </span>
                           </div>
-                          <div style={{ fontSize: 11, color: "#64748b" }}>
-                            {acc.username ? `@${acc.username}` : `ID: ${acc.accountId.slice(0, 12)}...`} • {acc.platform}
+
+                          <div style={{ fontSize: 11, color: hasEmail ? "#38bdf8" : "#ef4444", marginTop: 2 }}>
+                            {hasEmail ? `✉ ${acc.email}` : "⚠️ Thiếu Email — vui lòng cập nhật trên SEO-OPS"}
+                          </div>
+
+                          {acc.siteUrl && (
+                            <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>
+                              🌐 Site: <span className="mono-subtle">{acc.siteUrl}</span>
+                            </div>
+                          )}
+
+                          <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>
+                            {acc.hasPassword ? "🔑 Đã lưu mật khẩu" : "Chưa lưu mật khẩu"}
+                            {existingProfile && !modalTargetProfile && (
+                              <span style={{ marginLeft: 8, color: "#34d399" }}>
+                                • Đã có Profile: {existingProfile.name}
+                              </span>
+                            )}
                           </div>
                         </div>
+
                         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                          {acc.verified && (
-                            <span className="account-verified-tag">✓ Verified</span>
+                          {hasEmail ? (
+                            <button
+                              type="button"
+                              className={`btn ${
+                                isCurrentBinding
+                                  ? "btn-secondary"
+                                  : existingProfile && !modalTargetProfile
+                                  ? "btn-secondary"
+                                  : "btn-primary"
+                              }`}
+                              style={{ padding: "4px 10px", fontSize: 11 }}
+                              disabled={actionLoading || isCurrentBinding}
+                              onClick={() => void handleSelectAccount(acc)}
+                            >
+                              {isCurrentBinding
+                                ? "Đang chọn"
+                                : existingProfile && !modalTargetProfile
+                                ? "Mở Profile hiện có"
+                                : modalTargetProfile
+                                ? "Chọn liên kết"
+                                : "Tạo & Mở"}
+                            </button>
+                          ) : (
+                            <span style={{ fontSize: 10, color: "#ef4444", fontWeight: 500 }}>
+                              Không thể chọn
+                            </span>
                           )}
-                          <button
-                            type="button"
-                            className={`btn ${isCurrent ? "btn-secondary" : "btn-primary"}`}
-                            style={{ padding: "4px 10px", fontSize: 11 }}
-                          >
-                            {isCurrent ? "Đang chọn" : "Chọn liên kết"}
-                          </button>
                         </div>
                       </div>
                     );
@@ -728,7 +856,10 @@ export function BrowserProfilesPanel({ onNotify, isActiveTab }: BrowserProfilesP
               <button
                 type="button"
                 className="btn btn-secondary"
-                onClick={() => setBindingProfile(null)}
+                onClick={() => {
+                  setShowAccountModal(false);
+                  setModalTargetProfile(null);
+                }}
               >
                 Đóng
               </button>

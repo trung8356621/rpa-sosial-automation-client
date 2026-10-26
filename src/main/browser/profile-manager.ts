@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
-import type { BrowserProfile, SessionSignal } from "../../shared/contracts.js";
+import type { AccountBinding, AccountInfo, BrowserProfile, SessionSignal } from "../../shared/contracts.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
 
 function validateName(name: string): string {
@@ -15,9 +15,14 @@ export class ProfileManager {
   private profilesFile: string;
   private profiles: BrowserProfile[] = [];
   private activeBrowserId: string | null = null;
+  private sessionResetCallback: ((browserId: string, partition: string) => Promise<void>) | null = null;
 
   constructor(userDataPath: string) {
     this.profilesFile = path.join(userDataPath, "browser-profiles.json");
+  }
+
+  setSessionResetCallback(fn: (browserId: string, partition: string) => Promise<void>): void {
+    this.sessionResetCallback = fn;
   }
 
   async initialize(): Promise<void> {
@@ -61,11 +66,83 @@ export class ProfileManager {
     return this.profiles.find((p) => p.browserId === browserId);
   }
 
+  findByAccountId(accountId: string): BrowserProfile | undefined {
+    if (!accountId) return undefined;
+    return this.profiles.find((p) => p.accountBinding?.accountId === accountId);
+  }
+
   getActiveId(): string | null {
     return this.activeBrowserId;
   }
 
-  async create(name: string, platform: string = "facebook"): Promise<BrowserProfile> {
+  /**
+   * Account-First Browser Creation.
+   * Derives name and platform automatically from the SEO-OPS Account.
+   * If an existing profile for this account exists on this device, reuses it to prevent duplicates.
+   */
+  async createForAccount(account: AccountInfo): Promise<{ profile: BrowserProfile; alreadyExists: boolean }> {
+    if (!account || !account.accountId) {
+      throw new Error("Không thể tạo Browser nếu chưa chọn Account.");
+    }
+
+    const email = account.email ? account.email.trim() : "";
+    if (!email) {
+      throw new Error("Thiếu Email — vui lòng cập nhật trên SEO-OPS");
+    }
+
+    // If Account already has a Browser Profile on the same device: do not duplicate, reuse existing.
+    const existing = this.findByAccountId(account.accountId);
+    if (existing) {
+      logClientEvent("Account already has browser profile on this device, reusing existing", {
+        accountId: account.accountId,
+        browserId: existing.browserId,
+      });
+      return { profile: existing, alreadyExists: true };
+    }
+
+    const rawName = account.displayName || account.username || "Account";
+    const validName = validateName(rawName);
+    const platform = (account.platform || "facebook").toLowerCase();
+    const browserId = randomUUID();
+    const now = new Date().toISOString();
+
+    const profile: BrowserProfile = {
+      browserId,
+      name: validName,
+      platform,
+      partition: `persist:rpa-client-${browserId}`,
+      status: "stopped",
+      accountBinding: {
+        accountId: account.accountId,
+        boundAt: now,
+        accountName: account.displayName || account.username || undefined,
+        email: account.email,
+        siteUrl: account.siteUrl ?? undefined,
+      },
+      sessionSignal: { status: "unknown", checkedAt: null, method: null },
+      executionConfirmation: {
+        status: "not_run",
+        firstRunAt: null,
+        lastSuccessAt: null,
+        lastRunId: null,
+        screenshotRef: null,
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    this.profiles.push(profile);
+    await this.save();
+    logClientEvent("Created browser profile for account", {
+      browserId,
+      accountId: account.accountId,
+      name: validName,
+      platform,
+    });
+    return { profile, alreadyExists: false };
+  }
+
+  async create(name: string, platform: string = "facebook", accountBinding?: AccountBinding): Promise<BrowserProfile> {
     const validName = validateName(name);
     const browserId = randomUUID();
     const now = new Date().toISOString();
@@ -77,7 +154,7 @@ export class ProfileManager {
       // Partition is strictly tied to browserId and NEVER changes on rename
       partition: `persist:rpa-client-${browserId}`,
       status: "stopped",
-      accountBinding: { accountId: null, boundAt: null },
+      accountBinding: accountBinding || { accountId: null, boundAt: null },
       sessionSignal: { status: "unknown", checkedAt: null, method: null },
       executionConfirmation: {
         status: "not_run",
@@ -110,17 +187,23 @@ export class ProfileManager {
     return profile;
   }
 
-  async bindAccount(browserId: string, accountId: string, accountName?: string): Promise<BrowserProfile> {
+  async bindAccount(
+    browserId: string,
+    accountId: string,
+    accountName?: string,
+    email?: string | null,
+    siteUrl?: string | null
+  ): Promise<BrowserProfile> {
     const profile = this.get(browserId);
     if (!profile) {
       throw new Error(`Browser profile ${browserId} không tồn tại.`);
     }
 
     const prevAccountId = profile.accountBinding?.accountId ?? null;
-    const isAccountSwitch = prevAccountId !== accountId;
+    const isAccountSwitch = prevAccountId !== null && prevAccountId !== accountId;
 
     if (isAccountSwitch) {
-      // E5.3: Reset execution confirmation when switching account
+      // E5.3 & Requirement 6: Reset execution confirmation and session signal when switching account
       profile.executionConfirmation = {
         status: "not_run",
         firstRunAt: null,
@@ -128,13 +211,34 @@ export class ProfileManager {
         lastRunId: null,
         screenshotRef: null,
       };
-      logClientEvent("Switched bound account, reset execution confirmation", { browserId, prevAccountId, newAccountId: accountId });
+      profile.sessionSignal = {
+        status: "unknown",
+        checkedAt: null,
+        method: null,
+      };
+
+      // Wipe partition cookies/storage to prevent Account B from reusing Account A's session
+      if (this.sessionResetCallback) {
+        try {
+          await this.sessionResetCallback(browserId, profile.partition);
+        } catch (err) {
+          logClientError("Error during session reset on account switch", err);
+        }
+      }
+
+      logClientEvent("Switched bound account, reset execution confirmation and session", {
+        browserId,
+        prevAccountId,
+        newAccountId: accountId,
+      });
     }
 
     profile.accountBinding = {
       accountId,
       boundAt: new Date().toISOString(),
       accountName,
+      email: email ?? profile.accountBinding?.email ?? null,
+      siteUrl: siteUrl ?? profile.accountBinding?.siteUrl ?? null,
     };
     profile.updatedAt = new Date().toISOString();
 
@@ -159,6 +263,11 @@ export class ProfileManager {
       lastSuccessAt: null,
       lastRunId: null,
       screenshotRef: null,
+    };
+    profile.sessionSignal = {
+      status: "unknown",
+      checkedAt: null,
+      method: null,
     };
     profile.updatedAt = new Date().toISOString();
 

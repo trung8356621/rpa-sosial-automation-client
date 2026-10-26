@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, clipboard } from "electron";
 import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -200,10 +200,19 @@ async function bootstrap() {
       case "getBrowserState":
         return getBrowserStateSnapshot();
       case "createBrowserProfile": {
-        const created = await profileManager.create(cmd.name, cmd.platform);
+        if (cmd.account) {
+          const res = await profileManager.createForAccount(cmd.account);
+          void syncService?.syncAll();
+          broadcastBrowserState();
+          return res.profile;
+        }
+        throw new Error("Không thể tạo Browser nếu chưa chọn Account.");
+      }
+      case "createBrowserForAccount": {
+        const res = await profileManager.createForAccount(cmd.account);
         void syncService?.syncAll();
         broadcastBrowserState();
-        return created;
+        return res;
       }
       case "renameBrowserProfile": {
         const updated = await profileManager.rename(cmd.browserId, cmd.name);
@@ -258,7 +267,13 @@ async function bootstrap() {
         return await syncService!.getAccounts(cmd.platform);
       }
       case "bindAccount": {
-        const updated = await profileManager.bindAccount(cmd.browserId, cmd.accountId, cmd.accountName);
+        const updated = await profileManager.bindAccount(
+          cmd.browserId,
+          cmd.accountId,
+          cmd.accountName,
+          cmd.email,
+          cmd.siteUrl
+        );
         void syncService?.syncAll();
         broadcastBrowserState();
         return updated;
@@ -273,6 +288,10 @@ async function bootstrap() {
         const signal = await embeddedBrowser!.checkSessionSignal(cmd.browserId);
         broadcastBrowserState();
         return signal;
+      }
+      case "copyToClipboard": {
+        clipboard.writeText(cmd.text);
+        return true;
       }
 
       default:
