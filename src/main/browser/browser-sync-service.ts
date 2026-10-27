@@ -3,6 +3,7 @@ import type { AccountDetail } from "../../shared/contracts.js";
 import type { ClientConnection } from "../connection/client-connection.js";
 import type { ProfileManager } from "./profile-manager.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
+import { formatClientHttpError, SeoOpsHttpError } from "../../shared/seo-ops-http.js";
 
 export interface TargetBrowserPayload {
   browser_id: string;
@@ -30,6 +31,10 @@ export interface TargetBrowserPayload {
     screenshot_ref?: string | null;
   };
 }
+
+export type ConfirmLoginResult =
+  | { ok: true; session_state: string; dispatch_enabled: boolean }
+  | { ok: false; error: string };
 
 export function sanitizeProfilesForSync(profiles: BrowserProfile[]): TargetBrowserPayload[] {
   return profiles.filter((p) => Boolean(p.accountBinding?.accountId)
@@ -72,9 +77,24 @@ export function sanitizeProfilesForSync(profiles: BrowserProfile[]): TargetBrows
   }));
 }
 
+const CONFIRM_ERROR_LABELS: Record<string, string> = {
+  fresh_session_signal_required: "Cần tín hiệu đăng nhập mới sau yêu cầu (fresh_session_signal_required).",
+  browser_account_not_found: "Không tìm thấy Browser/Account trên thiết bị (browser_account_not_found).",
+};
+
+export function formatConfirmLoginFailure(error: unknown): string {
+  if (error instanceof SeoOpsHttpError && error.diagnostic.serverErrorCode) {
+    const code = error.diagnostic.serverErrorCode.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80);
+    return CONFIRM_ERROR_LABELS[code] || code;
+  }
+  const formatted = formatClientHttpError(error);
+  return formatted.replace(/Bearer\s+\S+|rpa_[A-Za-z0-9_-]+/gi, "[redacted]").slice(0, 300);
+}
+
 export class BrowserSyncService {
-  private pendingSync = false;
-  private syncing = false;
+  /** Set while a newer snapshot should be uploaded after the in-flight sync. */
+  private dirty = false;
+  private currentSync: Promise<boolean> | null = null;
   private wasOnline = false;
 
   constructor(
@@ -85,7 +105,7 @@ export class BrowserSyncService {
     // Re-sync when connection comes online
     this.connection.onStateChange((state) => {
       const online = state.status === "connected" && state.online;
-      if (online && (!this.wasOnline || this.pendingSync)) {
+      if (online && (!this.wasOnline || this.dirty)) {
         logClientEvent("Connection available, synchronizing eligible browser sessions");
         void this.syncAll();
       }
@@ -169,16 +189,27 @@ export class BrowserSyncService {
     return Boolean(res.acked);
   }
 
-  async confirmLogin(browserId: string, accountId: string, checkedAt: string | null): Promise<{ session_state: string; dispatch_enabled: boolean }> {
-    const res = await this.connection.requestWithAuth(
-      "/api/v1/social-automation/client/session-confirm-login",
-      "POST",
-      { browser_id: browserId, account_id: accountId, checked_at: checkedAt },
-    );
-    return {
-      session_state: String(res.session_state),
-      dispatch_enabled: Boolean(res.dispatch_enabled),
-    };
+  async confirmLogin(browserId: string, accountId: string, checkedAt: string | null): Promise<ConfirmLoginResult> {
+    try {
+      const res = await this.connection.requestWithAuth(
+        "/api/v1/social-automation/client/session-confirm-login",
+        "POST",
+        { browser_id: browserId, account_id: accountId, checked_at: checkedAt },
+      );
+      if (res.ok === false) {
+        const code = typeof res.error === "string"
+          ? res.error.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80)
+          : "confirm_failed";
+        return { ok: false, error: CONFIRM_ERROR_LABELS[code] || code };
+      }
+      return {
+        ok: true,
+        session_state: String(res.session_state),
+        dispatch_enabled: Boolean(res.dispatch_enabled),
+      };
+    } catch (err) {
+      return { ok: false, error: formatConfirmLoginFailure(err) };
+    }
   }
 
   async refreshAccountMetadata(): Promise<void> {
@@ -195,19 +226,50 @@ export class BrowserSyncService {
     this.onProfilesRefreshed?.();
   }
 
+  /**
+   * Upload the current local browser snapshot. Concurrent callers share one drain
+   * and await the most recent successful sync that includes their dirty mark.
+   */
   async syncAll(): Promise<boolean> {
-    if (this.syncing) {
-      this.pendingSync = true;
-      return false;
+    this.dirty = true;
+    if (!this.currentSync) {
+      this.currentSync = this.drainSync();
     }
+    return this.currentSync;
+  }
 
-    if (!this.connection.isOnline()) {
-      this.pendingSync = true;
-      logClientEvent("Client offline: browser sync queued for reconnection");
-      return false;
+  private async drainSync(): Promise<boolean> {
+    while (true) {
+      this.dirty = false;
+      if (!this.connection.isOnline()) {
+        this.dirty = true;
+        this.currentSync = null;
+        logClientEvent("Client offline: browser sync queued for reconnection");
+        return false;
+      }
+
+      const ok = await this.performSyncOnce();
+      if (!ok) {
+        this.dirty = true;
+        this.currentSync = null;
+        return false;
+      }
+
+      if (this.dirty) {
+        // Newer snapshot arrived during upload — replay before resolving waiters.
+        continue;
+      }
+
+      this.currentSync = null;
+      // Lost-wakeup window: a caller may have marked dirty between the check and clear.
+      if (this.dirty) {
+        return this.syncAll();
+      }
+      return true;
     }
+  }
 
-    this.syncing = true;
+  private async performSyncOnce(): Promise<boolean> {
     try {
       await this.refreshAccountMetadata();
       const profiles = this.profileManager.list();
@@ -224,7 +286,6 @@ export class BrowserSyncService {
       );
 
       if (response && response.ok) {
-        this.pendingSync = false;
         logClientEvent("Synced browser sessions to SEO-OPS successfully", {
           syncedCount: (response.browsers as unknown[])?.length ?? browsers.length,
         });
@@ -232,14 +293,10 @@ export class BrowserSyncService {
       }
 
       logClientError("SEO-OPS browser sync returned non-ok response", response);
-      this.pendingSync = true;
       return false;
     } catch (err) {
-      this.pendingSync = true;
       logClientError("Failed to sync browser sessions to SEO-OPS", err);
       return false;
-    } finally {
-      this.syncing = false;
     }
   }
 

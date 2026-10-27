@@ -602,6 +602,26 @@ body {
   gap: 8px;
 }
 
+.btn-confirm-login {
+  border: 1px solid #15803d;
+  border-radius: 8px;
+  background: #16a34a;
+  color: #f0fdf4;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+
+.btn-confirm-login:hover:not(:disabled) {
+  background: #15803d;
+}
+
+.btn-confirm-login:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 @media (max-width: 720px) {
   .notification-item {
     align-items: stretch;

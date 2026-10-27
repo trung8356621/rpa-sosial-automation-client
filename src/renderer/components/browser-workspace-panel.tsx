@@ -179,7 +179,7 @@ export function BrowserWorkspacePanel({
         type: "checkSessionSignal",
         browserId: activeBrowserId,
       });
-      onNotify?.("Đã kiểm tra lại tín hiệu session");
+      onNotify?.("Đã đồng bộ tín hiệu session (không xác nhận đăng nhập)");
       await refreshState();
     } catch (err: unknown) {
       alert((err as Error).message);
@@ -343,7 +343,7 @@ export function BrowserWorkspacePanel({
               className="link-action-btn"
               onClick={handleCheckSignal}
               disabled={checkingSignal || !activeBrowserId}
-              title="Kiểm tra lại tín hiệu cookie cho website này"
+              title="Chỉ đồng bộ tín hiệu cookie (evidence). Không xác nhận đăng nhập và không xóa Needs Login."
             >
               {checkingSignal ? "⌛" : "🔄"}
             </button>

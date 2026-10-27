@@ -44,30 +44,26 @@ export function AppShell() {
       setState(next);
     });
 
+    const unsubNotifications = window.client.onNotifications((rows) => {
+      setNotifications(rows);
+    });
+
     const unsubLog = window.client.onLog((entry) => {
       setLogs((prev) => [entry, ...prev.slice(0, 99)]);
     });
 
+    // One-shot hydrate from main-process orchestrator (polling lives in Main, not renderer).
+    void window.client.invoke<ClientNotification[]>({ type: "getNotifications" })
+      .then((rows) => setNotifications(rows))
+      .catch(() => { /* main will push on connect */ });
+
     return () => {
       clearInterval(refreshTimer);
       unsubState();
+      unsubNotifications();
       unsubLog();
     };
   }, []);
-
-  useEffect(() => {
-    if (!(state?.status === "connected" && state.online)) return;
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const rows = await window.client.invoke<ClientNotification[]>({ type: "getNotifications" });
-        if (!cancelled) setNotifications(rows);
-      } catch { /* retry on next heartbeat interval */ }
-    };
-    void poll();
-    const timer = setInterval(() => void poll(), 30_000);
-    return () => { cancelled = true; clearInterval(timer); };
-  }, [state?.status, state?.online]);
 
   const acknowledgeNotification = async (id: string) => {
     const acked = await window.client.invoke<boolean>({ type: "ackNotification", notificationId: id });
@@ -85,7 +81,12 @@ export function AppShell() {
       return;
     }
     try {
-      const result = await window.client.invoke<{ ok: boolean; error?: string; session_state?: string }>({
+      const result = await window.client.invoke<{
+        ok: boolean;
+        error?: string;
+        session_state?: string;
+        ack_pending?: boolean;
+      }>({
         type: "confirmNotificationLogin",
         notificationId: item.id,
         browserId: item.browser_id,
@@ -95,8 +96,12 @@ export function AppShell() {
         showNotification(result.error || "Chưa xác nhận được tín hiệu đăng nhập.");
         return;
       }
-      setNotifications((rows) => rows.filter((row) => row.id !== item.id));
-      showNotification("Đã xác nhận tín hiệu mới. Session chuyển về Candidate.");
+      if (result.ack_pending) {
+        showNotification("Session đã về Candidate. Thông báo còn chờ ACK — sẽ giữ lại để thử lại.");
+      } else {
+        setNotifications((rows) => rows.filter((row) => row.id !== item.id));
+        showNotification("Đã xác nhận đăng nhập. Session chuyển về Candidate.");
+      }
     } catch (error) {
       showNotification(error instanceof Error ? error.message : "Không thể xác nhận đăng nhập.");
     }
@@ -208,7 +213,14 @@ export function AppShell() {
                   <div className="notification-actions">
                     <button type="button" className="btn btn-secondary" disabled={!item.browser_id} onClick={() => void openNotificationBrowser(item)}>Mở Browser</button>
                     {item.type === "login_required" ? (
-                      <button type="button" className="btn btn-primary" onClick={() => void confirmLoginNotification(item)}>Đã đăng nhập — Kiểm tra lại</button>
+                      <button
+                        type="button"
+                        className="btn btn-confirm-login"
+                        title="Xác nhận đăng nhập sau khi có tín hiệu cookie mới — khác với nút 🔄 chỉ đồng bộ tín hiệu"
+                        onClick={() => void confirmLoginNotification(item)}
+                      >
+                        Xác nhận đã đăng nhập
+                      </button>
                     ) : (
                       <button type="button" className="btn btn-primary" onClick={() => void acknowledgeNotification(item.id)}>Đã xử lý</button>
                     )}

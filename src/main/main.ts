@@ -8,10 +8,11 @@ import { ClientCredentialStore } from "./storage/credential-store.js";
 import { DeviceManager } from "./device/device-manager.js";
 import { ClientConnection } from "./connection/client-connection.js";
 import { TrayManager } from "./app/tray-manager.js";
+import { NotificationOrchestrator } from "./app/notification-orchestrator.js";
 import { ProfileManager } from "./browser/profile-manager.js";
 import { BrowserSyncService } from "./browser/browser-sync-service.js";
 import { EmbeddedBrowser } from "./browser/embedded-browser.js";
-import type { ClientCommand, BrowserStateSnapshot } from "../shared/contracts.js";
+import type { ClientCommand, BrowserStateSnapshot, ClientNotification } from "../shared/contracts.js";
 import { ClipboardService } from "./clipboard/clipboard-service.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -21,6 +22,12 @@ const isSmokeTest = process.argv.includes("--smoke-test");
 const isCaptureM3 = process.argv.includes("--capture-m3");
 const isCaptureM4 = process.argv.includes("--capture-m4");
 const autoConnectKey = process.argv.find((a) => a.startsWith("--connect-key="))?.split("=")[1];
+
+/** Stable AUMID so Windows Toast can associate with this app (packaged + unpackaged Electron). */
+const APP_USER_MODEL_ID = "com.rpa.client.v2";
+if (process.platform === "win32") {
+  app.setAppUserModelId(APP_USER_MODEL_ID);
+}
 
 // Windows userData is strictly isolated to .local/client (never .local/creator)
 const userDataPath = app.isPackaged ? app.getPath("userData") : path.join(project, ".local", "client");
@@ -48,7 +55,21 @@ const connection = new ClientConnection(store, credentials, deviceManager);
 const profileManager = new ProfileManager(userDataPath);
 let syncService: BrowserSyncService | null = null;
 let embeddedBrowser: EmbeddedBrowser | null = null;
+let notificationOrchestrator: NotificationOrchestrator | null = null;
 const clipboardService = new ClipboardService(clipboard);
+
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function broadcastNotifications(notifications: ClientNotification[]): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("client:notifications", notifications);
+  }
+}
 
 function assertActiveAccount(accountId: string): void {
   const activeBrowserId = embeddedBrowser?.getActiveBrowserId();
@@ -117,11 +138,7 @@ function createWindow(): BrowserWindow {
 
 // Single-instance second instance handler
 app.on("second-instance", () => {
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
-  }
+  showMainWindow();
 });
 
 app.on("before-quit", async (event) => {
@@ -158,6 +175,12 @@ async function bootstrap() {
 
   syncService = new BrowserSyncService(connection, profileManager, broadcastBrowserState);
   embeddedBrowser = new EmbeddedBrowser(mainWindow, profileManager, syncService);
+  notificationOrchestrator = new NotificationOrchestrator(
+    connection,
+    syncService,
+    showMainWindow,
+    broadcastNotifications,
+  );
 
   embeddedBrowser.onViewStateChange(() => {
     broadcastBrowserState();
@@ -168,6 +191,7 @@ async function bootstrap() {
     connection,
     () => {
       isQuitting = true;
+      notificationOrchestrator?.destroy();
       trayManager?.destroy();
       app.quit();
     }
@@ -275,10 +299,17 @@ async function bootstrap() {
         return await syncService!.getAccount(cmd.accountId);
       }
       case "getNotifications": {
-        return await syncService!.getNotifications();
+        if (notificationOrchestrator) {
+          return await notificationOrchestrator.poll("renderer-refresh");
+        }
+        return [];
       }
       case "ackNotification": {
-        return await syncService!.acknowledgeNotification(cmd.notificationId);
+        const acked = await syncService!.acknowledgeNotification(cmd.notificationId);
+        if (acked) {
+          void notificationOrchestrator?.poll("after-ack");
+        }
+        return acked;
       }
       case "confirmNotificationLogin": {
         const profile = profileManager.get(cmd.browserId);
@@ -289,11 +320,33 @@ async function bootstrap() {
         if (signal.status !== "present") {
           return { ok: false, error: "Không phát hiện tín hiệu đăng nhập mới. Session vẫn Needs Login." };
         }
-        await syncService!.syncAll();
+        const synced = await syncService!.syncAll();
+        if (!synced) {
+          return {
+            ok: false,
+            error: "Không đồng bộ được tín hiệu mới lên SEO-OPS. Thử lại khi Client online.",
+          };
+        }
         const confirmed = await syncService!.confirmLogin(cmd.browserId, cmd.accountId, signal.checkedAt);
-        const acked = await syncService!.acknowledgeNotification(cmd.notificationId);
+        if (!confirmed.ok) {
+          return { ok: false, error: confirmed.error };
+        }
+        let ackPending = false;
+        try {
+          const acked = await syncService!.acknowledgeNotification(cmd.notificationId);
+          ackPending = !acked;
+        } catch (err) {
+          logClientError("ACK after login confirm failed; confirmation kept", err);
+          ackPending = true;
+        }
         broadcastBrowserState();
-        return { ok: acked, ...confirmed };
+        void notificationOrchestrator?.poll("after-confirm");
+        return {
+          ok: true,
+          ack_pending: ackPending,
+          session_state: confirmed.session_state,
+          dispatch_enabled: confirmed.dispatch_enabled,
+        };
       }
       case "copyAccountEmail": {
         await clipboardService.copy(async () => {

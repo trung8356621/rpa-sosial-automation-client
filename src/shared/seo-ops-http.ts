@@ -40,6 +40,16 @@ export function formatClientHttpError(error: unknown): string {
     if (d.status === 429) return `Quá nhiều yêu cầu. Vui lòng thử lại sau ${d.retryAfterSeconds ?? 30}s.`;
     if (d.status >= 500) return `Máy chủ SEO-OPS gặp lỗi (${d.status}). Vui lòng kiểm tra backend.`;
     if (d.category === "network_error") return "Không thể kết nối đến máy chủ. Kiểm tra mạng hoặc endpoint.";
+    if (d.serverErrorCode) {
+      const code = d.serverErrorCode.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80);
+      if (code === "fresh_session_signal_required") {
+        return "Cần tín hiệu đăng nhập mới sau yêu cầu (fresh_session_signal_required).";
+      }
+      if (code === "browser_account_not_found") {
+        return "Không tìm thấy Browser/Account trên thiết bị (browser_account_not_found).";
+      }
+      return d.serverErrorMessage ? `${d.serverErrorMessage} (${code})` : code;
+    }
     return d.serverErrorMessage || error.message;
   }
   const msg = (error as Error)?.message || String(error);

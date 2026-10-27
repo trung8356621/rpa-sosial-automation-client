@@ -209,7 +209,7 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
         type: "checkSessionSignal",
         browserId: profile.browserId,
       });
-      onNotify?.("Đã kiểm tra lại tín hiệu session");
+      onNotify?.("Đã đồng bộ tín hiệu session (không xác nhận đăng nhập)");
       await refreshState();
     } catch (err) {
       alert((err as Error).message);
@@ -321,7 +321,7 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
                         className="link-action-btn"
                         onClick={() => void handleCheckSignal(p)}
                         disabled={actionLoading || isCheckingSignal}
-                        title="Kiểm tra lại tín hiệu cookie"
+                        title="Chỉ đồng bộ tín hiệu cookie (evidence). Không xác nhận đăng nhập và không xóa Needs Login."
                       >
                         {isCheckingSignal ? "⌛" : "🔄"}
                       </button>

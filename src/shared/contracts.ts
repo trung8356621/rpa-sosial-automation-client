@@ -149,6 +149,7 @@ export interface ClientApi {
   invoke: <T = unknown>(command: ClientCommand) => Promise<T>;
   onStateChange: (callback: (state: ConnectionState) => void) => () => void;
   onBrowserStateChange: (callback: (state: BrowserStateSnapshot) => void) => () => void;
+  onNotifications: (callback: (notifications: ClientNotification[]) => void) => () => void;
   onLog: (callback: (entry: { time: string; level: string; message: string }) => void) => () => void;
 }
 
