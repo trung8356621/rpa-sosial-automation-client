@@ -32,7 +32,9 @@ export interface TargetBrowserPayload {
 }
 
 export function sanitizeProfilesForSync(profiles: BrowserProfile[]): TargetBrowserPayload[] {
-  return profiles.filter((p) => Boolean(p.accountBinding?.accountId) && p.sessionSignal?.status === "present").map((p) => ({
+  return profiles.filter((p) => Boolean(p.accountBinding?.accountId)
+    && Boolean(p.sessionSignal?.checkedAt)
+    && p.sessionSignal?.status !== "unknown").map((p) => ({
     browser_id: p.browserId,
     name: p.name,
     platform: p.platform || "facebook",
@@ -165,6 +167,18 @@ export class BrowserSyncService {
       `/api/v1/social-automation/client/notifications/${encodeURIComponent(notificationId)}/ack`, "POST", {}
     );
     return Boolean(res.acked);
+  }
+
+  async confirmLogin(browserId: string, accountId: string, checkedAt: string | null): Promise<{ session_state: string; dispatch_enabled: boolean }> {
+    const res = await this.connection.requestWithAuth(
+      "/api/v1/social-automation/client/session-confirm-login",
+      "POST",
+      { browser_id: browserId, account_id: accountId, checked_at: checkedAt },
+    );
+    return {
+      session_state: String(res.session_state),
+      dispatch_enabled: Boolean(res.dispatch_enabled),
+    };
   }
 
   async refreshAccountMetadata(): Promise<void> {

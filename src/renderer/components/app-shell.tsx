@@ -38,6 +38,7 @@ export function AppShell() {
 
   useEffect(() => {
     void refreshState();
+    const refreshTimer = setInterval(() => void refreshState(), 5_000);
 
     const unsubState = window.client.onStateChange((next) => {
       setState(next);
@@ -48,6 +49,7 @@ export function AppShell() {
     });
 
     return () => {
+      clearInterval(refreshTimer);
       unsubState();
       unsubLog();
     };
@@ -74,6 +76,29 @@ export function AppShell() {
       showNotification("Đã xác nhận xử lý; trạng thái Session không tự thay đổi");
     } else {
       showNotification("Không thể gửi xác nhận. Thông báo vẫn được giữ lại.");
+    }
+  };
+
+  const confirmLoginNotification = async (item: ClientNotification) => {
+    if (!item.browser_id || !item.account_id) {
+      showNotification("Thông báo không có Browser/Account hợp lệ.");
+      return;
+    }
+    try {
+      const result = await window.client.invoke<{ ok: boolean; error?: string; session_state?: string }>({
+        type: "confirmNotificationLogin",
+        notificationId: item.id,
+        browserId: item.browser_id,
+        accountId: item.account_id,
+      });
+      if (!result.ok) {
+        showNotification(result.error || "Chưa xác nhận được tín hiệu đăng nhập.");
+        return;
+      }
+      setNotifications((rows) => rows.filter((row) => row.id !== item.id));
+      showNotification("Đã xác nhận tín hiệu mới. Session chuyển về Candidate.");
+    } catch (error) {
+      showNotification(error instanceof Error ? error.message : "Không thể xác nhận đăng nhập.");
     }
   };
 
@@ -177,12 +202,16 @@ export function AppShell() {
               {notifications.map((item) => (
                 <article key={item.id} className="notification-item">
                   <div className="notification-copy">
-                    <strong>{item.type === "login_required" ? "Yêu cầu đăng nhập lại" : "Yêu cầu xử lý"} · {item.account_name}</strong>
+                    <strong>{item.type === "login_required" ? "Yêu cầu đăng nhập lại" : item.type === "display_message" ? "Thông báo" : "Yêu cầu xử lý"} · {item.account_name}</strong>
                     <span>{item.message}</span>
                   </div>
                   <div className="notification-actions">
                     <button type="button" className="btn btn-secondary" disabled={!item.browser_id} onClick={() => void openNotificationBrowser(item)}>Mở Browser</button>
-                    <button type="button" className="btn btn-primary" onClick={() => void acknowledgeNotification(item.id)}>Đã xử lý</button>
+                    {item.type === "login_required" ? (
+                      <button type="button" className="btn btn-primary" onClick={() => void confirmLoginNotification(item)}>Đã đăng nhập — Kiểm tra lại</button>
+                    ) : (
+                      <button type="button" className="btn btn-primary" onClick={() => void acknowledgeNotification(item.id)}>Đã xử lý</button>
+                    )}
                   </div>
                 </article>
               ))}

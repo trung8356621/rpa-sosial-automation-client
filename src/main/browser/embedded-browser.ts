@@ -358,7 +358,7 @@ export class EmbeddedBrowser {
         origin: parsed.origin,
       });
       await this.profileManager.updateSessionSignal(targetId, signal);
-      void this.syncService.syncAll();
+      await this.syncService.syncAll();
       return signal;
     } catch (err) {
       logClientError("Error checking session signal", err);

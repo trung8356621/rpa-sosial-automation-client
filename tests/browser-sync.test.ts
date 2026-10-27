@@ -56,11 +56,42 @@ test("BrowserSync: formats target metadata schema and strictly omits forbidden f
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
+    {
+      browserId: "b3f36077-9ca6-4d26-a94f-a7f45b331004",
+      name: "Existing Account Without Signal",
+      platform: "facebook",
+      partition: "persist:rpa-client-b3f36077-9ca6-4d26-a94f-a7f45b331004",
+      status: "stopped",
+      accountBinding: {
+        accountId: "820c2507-1ef8-46f2-a59e-7c6fe9fc9f84",
+        boundAt: "2026-10-26T12:00:00Z",
+        accountName: "No signal",
+      },
+      sessionSignal: { status: "unknown", checkedAt: null, method: null },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+    {
+      browserId: "b3f36077-9ca6-4d26-a94f-a7f45b331005",
+      name: "Account With Absent Signal",
+      platform: "facebook",
+      partition: "persist:rpa-client-b3f36077-9ca6-4d26-a94f-a7f45b331005",
+      status: "stopped",
+      accountBinding: {
+        accountId: "820c2507-1ef8-46f2-a59e-7c6fe9fc9f85",
+        boundAt: "2026-10-26T12:00:00Z",
+        accountName: "Absent signal",
+      },
+      sessionSignal: { status: "absent", checkedAt: "2026-10-26T12:15:00Z", method: "facebook_c_user_cookie" },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
   ];
 
   const sanitized = sanitizeProfilesForSync(profiles);
 
-  assert.equal(sanitized.length, 1, "local profiles without both Account and session signal stay local");
+  assert.equal(sanitized.length, 2, "unchecked profiles stay local while changed absent signals are eligible for sync");
+  assert.equal(sanitized[1].session_signal.status, "absent");
 
   // Target schema verification for profile 1
   assert.equal(sanitized[0].browser_id, "b3f36077-9ca6-4d26-a94f-a7f45b331001");

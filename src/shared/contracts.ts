@@ -106,7 +106,7 @@ export interface BrowserStateSnapshot {
 
 export interface ClientNotification {
   id: string;
-  type: "manual_intervention" | "login_required";
+  type: "manual_intervention" | "login_required" | "display_message";
   message: string;
   account_id?: string | null;
   account_name: string;
@@ -142,7 +142,8 @@ export type ClientCommand =
   | { type: "unbindAccount"; browserId: string }
   | { type: "checkSessionSignal"; browserId: string }
   | { type: "getNotifications" }
-  | { type: "ackNotification"; notificationId: string };
+  | { type: "ackNotification"; notificationId: string }
+  | { type: "confirmNotificationLogin"; notificationId: string; browserId: string; accountId: string };
 
 export interface ClientApi {
   invoke: <T = unknown>(command: ClientCommand) => Promise<T>;

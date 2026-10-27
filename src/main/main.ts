@@ -280,6 +280,21 @@ async function bootstrap() {
       case "ackNotification": {
         return await syncService!.acknowledgeNotification(cmd.notificationId);
       }
+      case "confirmNotificationLogin": {
+        const profile = profileManager.get(cmd.browserId);
+        if (!profile || profile.accountBinding?.accountId !== cmd.accountId) {
+          throw new Error("Notification không khớp Browser/Account trên thiết bị này.");
+        }
+        const signal = await embeddedBrowser!.checkSessionSignal(cmd.browserId);
+        if (signal.status !== "present") {
+          return { ok: false, error: "Không phát hiện tín hiệu đăng nhập mới. Session vẫn Needs Login." };
+        }
+        await syncService!.syncAll();
+        const confirmed = await syncService!.confirmLogin(cmd.browserId, cmd.accountId, signal.checkedAt);
+        const acked = await syncService!.acknowledgeNotification(cmd.notificationId);
+        broadcastBrowserState();
+        return { ok: acked, ...confirmed };
+      }
       case "copyAccountEmail": {
         await clipboardService.copy(async () => {
           assertActiveAccount(cmd.accountId);
