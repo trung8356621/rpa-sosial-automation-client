@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import type { ConnectionState } from "../../shared/contracts.js";
+import type { ClientNotification, ConnectionState } from "../../shared/contracts.js";
 import { DeviceStatusPanel } from "./device-status-panel.js";
 import { ConnectionSettingsPanel } from "./connection-settings-panel.js";
 import { BrowserProfilesPanel } from "./browser-profiles-panel.js";
@@ -18,6 +18,7 @@ export function AppShell() {
   const [activeTab, setActiveTab] = useState<Tab>("profiles");
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [toast, setToast] = useState<string | null>(null);
+  const [notifications, setNotifications] = useState<ClientNotification[]>([]);
 
   const refreshState = async () => {
     try {
@@ -51,6 +52,43 @@ export function AppShell() {
       unsubLog();
     };
   }, []);
+
+  useEffect(() => {
+    if (!(state?.status === "connected" && state.online)) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const rows = await window.client.invoke<ClientNotification[]>({ type: "getNotifications" });
+        if (!cancelled) setNotifications(rows);
+      } catch { /* retry on next heartbeat interval */ }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), 30_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [state?.status, state?.online]);
+
+  const acknowledgeNotification = async (id: string) => {
+    const acked = await window.client.invoke<boolean>({ type: "ackNotification", notificationId: id });
+    if (acked) {
+      setNotifications((rows) => rows.filter((row) => row.id !== id));
+      showNotification("Đã xác nhận xử lý; trạng thái Session không tự thay đổi");
+    } else {
+      showNotification("Không thể gửi xác nhận. Thông báo vẫn được giữ lại.");
+    }
+  };
+
+  const openNotificationBrowser = async (item: ClientNotification) => {
+    if (!item.browser_id) {
+      showNotification("Thông báo không có Browser hợp lệ.");
+      return;
+    }
+    try {
+      await window.client.invoke({ type: "openBrowser", browserId: item.browser_id });
+      setActiveTab("browser");
+    } catch (error) {
+      showNotification(error instanceof Error ? error.message : "Không thể mở Browser.");
+    }
+  };
 
   if (!state) {
     return (
@@ -133,6 +171,23 @@ export function AppShell() {
         </aside>
 
         <main className={`main-content ${activeTab === "browser" ? "browser-active" : ""}`}>
+          {notifications.length > 0 && (
+            <section className="notification-center" aria-label="Notification center">
+              <div className="notification-center-title">Yêu cầu cần xử lý ({notifications.length})</div>
+              {notifications.map((item) => (
+                <article key={item.id} className="notification-item">
+                  <div className="notification-copy">
+                    <strong>{item.type === "login_required" ? "Yêu cầu đăng nhập lại" : "Yêu cầu xử lý"} · {item.account_name}</strong>
+                    <span>{item.message}</span>
+                  </div>
+                  <div className="notification-actions">
+                    <button type="button" className="btn btn-secondary" disabled={!item.browser_id} onClick={() => void openNotificationBrowser(item)}>Mở Browser</button>
+                    <button type="button" className="btn btn-primary" onClick={() => void acknowledgeNotification(item.id)}>Đã xử lý</button>
+                  </div>
+                </article>
+              ))}
+            </section>
+          )}
           <div style={{ display: activeTab === "profiles" ? "block" : "none" }}>
             <BrowserProfilesPanel
               onNotify={showNotification}

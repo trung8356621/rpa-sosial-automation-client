@@ -13,8 +13,6 @@ interface BrowserProfilesPanelProps {
 
 export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfilesPanelProps) {
   const [snapshot, setSnapshot] = useState<BrowserStateSnapshot | null>(null);
-  const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
 
   // Account-first selection state
@@ -62,12 +60,6 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
     setModalTargetProfile(null);
     setShowAccountModal(true);
     void loadAccounts();
-  };
-
-  const openAccountPickerForExistingProfile = (profile: BrowserProfile) => {
-    setModalTargetProfile(profile);
-    setShowAccountModal(true);
-    void loadAccounts(profile.platform);
   };
 
   const handleSelectAccount = async (acc: AccountInfo) => {
@@ -147,26 +139,6 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
     }
   };
 
-  const handleRename = async (browserId: string) => {
-    if (!renameValue.trim()) return;
-    setActionLoading(true);
-    try {
-      await window.client.invoke({
-        type: "renameBrowserProfile",
-        browserId,
-        name: renameValue.trim(),
-      });
-      setRenamingId(null);
-      setRenameValue("");
-      onNotify?.("Đã đổi tên Profile");
-      await refreshState();
-    } catch (err) {
-      alert((err as Error).message);
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
   const handleDelete = async (profile: BrowserProfile) => {
     if (profile.status === "running") {
       alert("Không thể xóa profile đang chạy. Hãy dừng trình duyệt trước.");
@@ -195,7 +167,7 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
   const handleOpen = async (profile: BrowserProfile) => {
     // If profile has no account bound, mandate selecting an account first
     if (!profile.accountBinding?.accountId) {
-      openAccountPickerForExistingProfile(profile);
+      alert("Browser legacy chưa liên kết Account không thể mở để dispatch. Hãy xóa và tạo lại từ Account.");
       return;
     }
 
@@ -260,14 +232,19 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
               Khởi tạo Browser trực tiếp từ Account SEO-OPS. Hệ thống tự động đặt tên, chọn nền tảng, thiết lập partition cô lập và mở website.
             </div>
           </div>
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={openAccountPickerForNewBrowser}
-            disabled={actionLoading}
-          >
-            + Mở Browser từ Account
-          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" className="btn btn-secondary" onClick={() => void refreshState()} disabled={actionLoading}>
+              Làm mới
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={openAccountPickerForNewBrowser}
+              disabled={actionLoading}
+            >
+              + Mở Browser từ Account
+            </button>
+          </div>
         </div>
 
         {profiles.length === 0 ? (
@@ -278,7 +255,6 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
           <div className="profile-grid">
             {profiles.map((p) => {
               const isRunning = p.status === "running";
-              const isRenaming = renamingId === p.browserId;
               const boundAccount = p.accountBinding?.accountId;
               const boundName = p.accountBinding?.accountName;
               const boundEmail = p.accountBinding?.email;
@@ -293,40 +269,11 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
                 >
                   <div className="profile-header">
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      {isRenaming ? (
-                        <div style={{ display: "flex", gap: 6 }}>
-                          <input
-                            type="text"
-                            className="form-input"
-                            style={{ padding: "3px 6px", fontSize: 12 }}
-                            value={renameValue}
-                            onChange={(e) => setRenameValue(e.target.value)}
-                            autoFocus
-                          />
-                          <button
-                            type="button"
-                            className="btn btn-primary"
-                            style={{ padding: "3px 8px", fontSize: 11 }}
-                            onClick={() => void handleRename(p.browserId)}
-                          >
-                            OK
-                          </button>
-                          <button
-                            type="button"
-                            className="btn btn-secondary"
-                            style={{ padding: "3px 8px", fontSize: 11 }}
-                            onClick={() => setRenamingId(null)}
-                          >
-                            X
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="profile-title" title={p.name}>
-                          {p.name}
-                        </div>
-                      )}
+                      <div className="profile-title" title={boundName || boundAccount || "Legacy Browser"}>
+                        {boundName || boundEmail || "Legacy Browser cần xử lý"}
+                      </div>
                       <div className="profile-sub">
-                        ID: <span className="mono-subtle">{p.browserId.slice(0, 8)}...</span> • {p.platform}
+                        {p.platform}
                         {detectedTag !== "unknown" && (
                           <span style={{ marginLeft: 6, color: "#38bdf8" }}>• {detectedTag}</span>
                         )}
@@ -343,39 +290,6 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
                     </span>
                   </div>
 
-                  {/* Account Binding Row */}
-                  <div className="profile-meta-row">
-                    <span className="meta-label">Account SEO-OPS:</span>
-                    {boundAccount ? (
-                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                        <span className="account-tag" title={boundAccount}>
-                          👤 {boundName || boundAccount.slice(0, 8)}
-                          {boundEmail && <span style={{ opacity: 0.8 }}> ({boundEmail})</span>}
-                        </span>
-                        <button
-                          type="button"
-                          className="link-action-btn"
-                          onClick={() => openAccountPickerForExistingProfile(p)}
-                          disabled={actionLoading}
-                        >
-                          Đổi
-                        </button>
-                      </div>
-                    ) : (
-                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                        <span style={{ color: "#ef4444", fontSize: 11 }}>Chưa liên kết</span>
-                        <button
-                          type="button"
-                          className="link-action-btn text-primary"
-                          onClick={() => openAccountPickerForExistingProfile(p)}
-                          disabled={actionLoading}
-                        >
-                          + Chọn Account
-                        </button>
-                      </div>
-                    )}
-                  </div>
-
                   {/* Session Signal Row */}
                   <div className="profile-meta-row">
                     <span className="meta-label">Tín hiệu Session:</span>
@@ -386,15 +300,19 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
                           title={
                             p.sessionSignal?.method === "facebook_c_user_cookie"
                               ? "Phát hiện cookie c_user"
-                              : "Phát hiện cookie phiên từ site"
+                              : "Phát hiện cookie đăng nhập WordPress"
                           }
                         >
                           ● Có tín hiệu phiên
                         </span>
                       ) : signalStatus === "absent" ? (
-                        <span className="signal-pill absent" title="Không phát hiện cookie trong session">
-                          ○ Không có cookie
+                        <span className="signal-pill absent" title="Không phát hiện tín hiệu đăng nhập phù hợp">
+                          ○ Không phát hiện tín hiệu
                         </span>
+                      ) : signalStatus === "unsupported" ? (
+                        <span className="signal-pill unknown">Không hỗ trợ website này</span>
+                      ) : signalStatus === "error" ? (
+                        <span className="signal-pill absent" title={p.sessionSignal?.error || undefined}>Lỗi kiểm tra</span>
                       ) : (
                         <span className="signal-pill unknown">Chưa kiểm tra</span>
                       )}
@@ -445,25 +363,10 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
                         className="btn btn-primary"
                         style={{ padding: "4px 10px", fontSize: 11 }}
                         onClick={() => void handleOpen(p)}
-                        disabled={actionLoading}
+                        disabled={actionLoading || !boundAccount}
+                        title={!boundAccount ? "Legacy Browser chưa liên kết Account không thể mở" : "Mở Browser"}
                       >
                         ▶ Mở Browser
-                      </button>
-                    )}
-
-                    {!isRenaming && (
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        style={{ padding: "4px 8px", fontSize: 11 }}
-                        onClick={() => {
-                          setRenamingId(p.browserId);
-                          setRenameValue(p.name);
-                        }}
-                        disabled={actionLoading}
-                        title="Đổi tên profile"
-                      >
-                        ✏️ Sửa tên
                       </button>
                     )}
 
@@ -478,6 +381,12 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
                       🗑️
                     </button>
                   </div>
+                  <details className="profile-technical-details">
+                    <summary>Technical Details</summary>
+                    <div>Browser ID: <span className="mono-subtle">{p.browserId}</span></div>
+                    <div>Partition: <span className="mono-subtle">{p.partition}</span></div>
+                    {boundEmail && <div>Email: {boundEmail}</div>}
+                  </details>
                 </div>
               );
             })}

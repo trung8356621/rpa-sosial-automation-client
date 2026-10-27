@@ -47,6 +47,10 @@ export interface AccountInfo {
   verified: boolean;
 }
 
+export interface AccountDetail extends AccountInfo {
+  passwordStatus: "available" | "not_set";
+}
+
 export interface AccountBinding {
   accountId: string | null;
   boundAt: string | null;
@@ -56,9 +60,10 @@ export interface AccountBinding {
 }
 
 export interface SessionSignal {
-  status: "present" | "absent" | "unknown";
+  status: "present" | "absent" | "unsupported" | "error" | "unknown";
   checkedAt: string | null;
-  method: "facebook_c_user_cookie" | "site_cookie_presence" | null;
+  method: "facebook_c_user_cookie" | "wordpress_auth_cookie" | "site_cookie_presence" | null;
+  error?: string | null;
 }
 
 export interface ExecutionConfirmation {
@@ -99,6 +104,17 @@ export interface BrowserStateSnapshot {
   viewState: BrowserViewState;
 }
 
+export interface ClientNotification {
+  id: string;
+  type: "manual_intervention" | "login_required";
+  message: string;
+  account_id?: string | null;
+  account_name: string;
+  browser_id?: string | null;
+  task_id?: number | null;
+  created_at?: string | null;
+}
+
 export type ClientCommand =
   | { type: "getConnectionState" }
   | { type: "setEndpoint"; endpoint: string }
@@ -109,7 +125,6 @@ export type ClientCommand =
   | { type: "getBrowserState" }
   | { type: "createBrowserProfile"; name: string; platform?: string; account?: AccountInfo }
   | { type: "createBrowserForAccount"; account: AccountInfo }
-  | { type: "renameBrowserProfile"; browserId: string; name: string }
   | { type: "deleteBrowserProfile"; browserId: string }
   | { type: "openBrowser"; browserId: string; initialUrl?: string }
   | { type: "stopBrowser"; browserId?: string }
@@ -120,10 +135,14 @@ export type ClientCommand =
   | { type: "setBrowserViewBounds"; bounds: { x: number; y: number; width: number; height: number } }
   | { type: "setBrowserViewVisible"; visible: boolean }
   | { type: "getAccounts"; platform?: string }
+  | { type: "getAccount"; accountId: string }
+  | { type: "copyAccountEmail"; accountId: string }
+  | { type: "copyAccountPassword"; accountId: string }
   | { type: "bindAccount"; browserId: string; accountId: string; accountName?: string; platform?: string; email?: string | null; siteUrl?: string | null }
   | { type: "unbindAccount"; browserId: string }
   | { type: "checkSessionSignal"; browserId: string }
-  | { type: "copyToClipboard"; text: string };
+  | { type: "getNotifications" }
+  | { type: "ackNotification"; notificationId: string };
 
 export interface ClientApi {
   invoke: <T = unknown>(command: ClientCommand) => Promise<T>;

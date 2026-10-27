@@ -86,7 +86,7 @@ export class ProfileManager {
     }
 
     const email = account.email ? account.email.trim() : "";
-    if (!email) {
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       throw new Error("Thiếu Email — vui lòng cập nhật trên SEO-OPS");
     }
 
@@ -143,6 +143,9 @@ export class ProfileManager {
   }
 
   async create(name: string, platform: string = "facebook", accountBinding?: AccountBinding): Promise<BrowserProfile> {
+    if (!accountBinding?.accountId) {
+      throw new Error("Không thể tạo Browser nếu chưa chọn Account.");
+    }
     const validName = validateName(name);
     const browserId = randomUUID();
     const now = new Date().toISOString();
@@ -173,20 +176,6 @@ export class ProfileManager {
     return profile;
   }
 
-  async rename(browserId: string, name: string): Promise<BrowserProfile> {
-    const validName = validateName(name);
-    const profile = this.get(browserId);
-    if (!profile) {
-      throw new Error(`Browser profile ${browserId} không tồn tại.`);
-    }
-
-    profile.name = validName;
-    profile.updatedAt = new Date().toISOString();
-    await this.save();
-    logClientEvent("Renamed browser profile", { browserId, newName: validName });
-    return profile;
-  }
-
   async bindAccount(
     browserId: string,
     accountId: string,
@@ -201,7 +190,10 @@ export class ProfileManager {
     }
 
     const prevAccountId = profile.accountBinding?.accountId ?? null;
-    const isAccountSwitch = prevAccountId !== null && prevAccountId !== accountId;
+    if (prevAccountId !== accountId) {
+      throw new Error("Account binding là bất biến. Hãy xóa Browser cũ và tạo Browser mới.");
+    }
+    const isAccountSwitch = false;
 
     if (platform && platform.trim()) {
       profile.platform = platform.toLowerCase().trim();
@@ -258,27 +250,7 @@ export class ProfileManager {
       throw new Error(`Browser profile ${browserId} không tồn tại.`);
     }
 
-    profile.accountBinding = {
-      accountId: null,
-      boundAt: null,
-    };
-    profile.executionConfirmation = {
-      status: "not_run",
-      firstRunAt: null,
-      lastSuccessAt: null,
-      lastRunId: null,
-      screenshotRef: null,
-    };
-    profile.sessionSignal = {
-      status: "unknown",
-      checkedAt: null,
-      method: null,
-    };
-    profile.updatedAt = new Date().toISOString();
-
-    await this.save();
-    logClientEvent("Unbound account from browser profile", { browserId });
-    return profile;
+    throw new Error("Không thể gỡ Account khỏi Browser. Hãy xóa Browser để bảo toàn session isolation.");
   }
 
   async updateSessionSignal(browserId: string, signal: SessionSignal): Promise<void> {
@@ -286,6 +258,17 @@ export class ProfileManager {
     if (!profile) return;
 
     profile.sessionSignal = signal;
+    profile.updatedAt = new Date().toISOString();
+    await this.save();
+  }
+
+  async refreshAccountMetadata(browserId: string, account: AccountInfo): Promise<void> {
+    const profile = this.get(browserId);
+    if (!profile || profile.accountBinding?.accountId !== account.accountId) return;
+    profile.platform = account.platform.toLowerCase().trim();
+    profile.accountBinding.accountName = account.displayName;
+    profile.accountBinding.email = account.email;
+    profile.accountBinding.siteUrl = account.siteUrl ?? null;
     profile.updatedAt = new Date().toISOString();
     await this.save();
   }

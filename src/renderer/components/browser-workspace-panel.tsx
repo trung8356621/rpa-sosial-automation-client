@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import {
   type BrowserProfile,
   type BrowserStateSnapshot,
-  type AccountInfo,
+  type AccountDetail,
   detectBrowserTagFromUrl,
   isDomainMatchingAccount,
 } from "../../shared/contracts.js";
@@ -22,7 +22,9 @@ export function BrowserWorkspacePanel({
   const [addressInput, setAddressInput] = useState("");
   const [actionLoading, setActionLoading] = useState(false);
   const [checkingSignal, setCheckingSignal] = useState(false);
-  const [availableAccounts, setAvailableAccounts] = useState<AccountInfo[]>([]);
+  const [activeAccount, setActiveAccount] = useState<AccountDetail | null>(null);
+  const [accountError, setAccountError] = useState<string | null>(null);
+  const [copyingPassword, setCopyingPassword] = useState(false);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
 
@@ -64,12 +66,6 @@ export function BrowserWorkspacePanel({
       }
     });
 
-    // Also fetch accounts for password / metadata checking
-    void window.client
-      .invoke<AccountInfo[]>({ type: "getAccounts" })
-      .then((accs) => setAvailableAccounts(accs))
-      .catch(() => {});
-
     return () => unsub();
   }, [refreshState]);
 
@@ -102,11 +98,19 @@ export function BrowserWorkspacePanel({
   const viewState = snapshot?.viewState;
 
   const currentWebsiteTag = detectBrowserTagFromUrl(viewState?.currentUrl || activeProfile?.lastUrl || "");
-  const activeAccount = availableAccounts.find(
-    (a) => a.accountId === activeProfile?.accountBinding?.accountId
-  );
-  const activeAccountEmail = activeProfile?.accountBinding?.email || activeAccount?.email || null;
-  const activeAccountHasPassword = activeAccount?.hasPassword ?? false;
+  const activeAccountId = activeProfile?.accountBinding?.accountId ?? null;
+  const activeAccountEmail = activeAccount?.email ?? null;
+
+  useEffect(() => {
+    let cancelled = false;
+    setActiveAccount(null);
+    setAccountError(null);
+    if (!activeAccountId) return;
+    void window.client.invoke<AccountDetail>({ type: "getAccount", accountId: activeAccountId })
+      .then((account) => { if (!cancelled) setActiveAccount(account); })
+      .catch((err: unknown) => { if (!cancelled) setAccountError((err as Error).message || "Không thể tải Account"); });
+    return () => { cancelled = true; };
+  }, [activeAccountId]);
 
   // Domain mismatch check
   const domainMatches = isDomainMatchingAccount(
@@ -144,22 +148,27 @@ export function BrowserWorkspacePanel({
     }
   };
 
-  const handleCopyEmail = async (email: string) => {
+  const handleCopyEmail = async () => {
     try {
-      await window.client.invoke({ type: "copyToClipboard", text: email });
-      if (navigator.clipboard) {
-        await navigator.clipboard.writeText(email);
-      }
-      onNotify?.(`Đã copy Email: ${email}`);
-    } catch {
-      alert(`Không thể copy email: ${email}`);
+      if (!activeAccountId) return;
+      await window.client.invoke({ type: "copyAccountEmail", accountId: activeAccountId });
+      onNotify?.("Đã copy Email");
+    } catch (err: unknown) {
+      alert((err as Error).message || "Không thể copy email");
     }
   };
 
-  const handleCopyPassword = () => {
-    alert(
-      "Chưa thể copy mật khẩu từ xa: Cơ chế Client API Key dùng chung chưa hỗ trợ phân quyền giải mã mật khẩu an toàn. Vui lòng nhập mật khẩu trực tiếp."
-    );
+  const handleCopyPassword = async () => {
+    if (!activeAccountId) return;
+    setCopyingPassword(true);
+    try {
+      await window.client.invoke({ type: "copyAccountPassword", accountId: activeAccountId });
+      onNotify?.("Đã copy mật khẩu");
+    } catch (err: unknown) {
+      alert((err as Error).message || "Không thể copy mật khẩu");
+    } finally {
+      setCopyingPassword(false);
+    }
   };
 
   const handleCheckSignal = async () => {
@@ -261,7 +270,7 @@ export function BrowserWorkspacePanel({
         <div className="browser-workspace-subbar">
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <span>
-              Profile: <strong>{activeProfile.name}</strong>
+              Account: <strong>{activeProfile.accountBinding?.accountName || activeAccount?.displayName || "Legacy Browser"}</strong>
             </span>
 
             {/* Current Website auto-detected from URL */}
@@ -295,7 +304,7 @@ export function BrowserWorkspacePanel({
                   <button
                     type="button"
                     className="link-action-btn credential-btn"
-                    onClick={() => void handleCopyEmail(activeAccountEmail)}
+                    onClick={() => void handleCopyEmail()}
                     title="Copy email vào clipboard"
                   >
                     📋 Copy Email
@@ -304,12 +313,12 @@ export function BrowserWorkspacePanel({
 
                 <button
                   type="button"
-                  className={`link-action-btn credential-btn ${!activeAccountHasPassword ? "disabled" : ""}`}
-                  onClick={handleCopyPassword}
-                  disabled={!activeAccountHasPassword}
-                  title={activeAccountHasPassword ? "Copy mật khẩu" : "Chưa lưu mật khẩu trên SEO-OPS"}
+                  className={`link-action-btn credential-btn ${activeAccount?.passwordStatus !== "available" ? "disabled" : ""}`}
+                  onClick={() => void handleCopyPassword()}
+                  disabled={copyingPassword || activeAccount?.passwordStatus !== "available"}
+                  title={accountError || "Copy mật khẩu"}
                 >
-                  🔑 {activeAccountHasPassword ? "Copy Password" : "Chưa lưu mật khẩu"}
+                  🔑 {accountError ? "Lỗi tải trạng thái" : activeAccount?.passwordStatus === "available" ? (copyingPassword ? "Đang copy..." : "Copy Password") : activeAccount?.passwordStatus === "not_set" ? "Chưa lưu mật khẩu" : "Đang kiểm tra..."}
                 </button>
               </div>
             ) : (
@@ -321,7 +330,11 @@ export function BrowserWorkspacePanel({
             {activeProfile.sessionSignal?.status === "present" ? (
               <span className="signal-pill present">● Có tín hiệu phiên</span>
             ) : activeProfile.sessionSignal?.status === "absent" ? (
-              <span className="signal-pill absent">○ Không có cookie</span>
+              <span className="signal-pill absent">○ Không phát hiện tín hiệu đăng nhập</span>
+            ) : activeProfile.sessionSignal?.status === "unsupported" ? (
+              <span className="signal-pill unknown">Không hỗ trợ kiểm tra website này</span>
+            ) : activeProfile.sessionSignal?.status === "error" ? (
+              <span className="signal-pill absent" title={activeProfile.sessionSignal.error || undefined}>Lỗi kiểm tra session</span>
             ) : (
               <span className="signal-pill unknown">Tín hiệu: Chưa kiểm tra</span>
             )}

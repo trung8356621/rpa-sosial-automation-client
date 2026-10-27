@@ -217,8 +217,7 @@ test("I. Profile/session cũ không bị mất sau cập nhật", async () => {
     await pm.initialize();
 
     // Create legacy style profile
-    const p1 = await pm.create("Legacy Profile 01", "facebook");
-    await pm.bindAccount(p1.browserId, "legacy-acc-123", "Legacy Account", "legacy@fb.com");
+    const p1 = await pm.create("Legacy Profile 01", "facebook", {accountId:"legacy-acc-123",boundAt:new Date().toISOString(),accountName:"Legacy Account",email:"legacy@fb.com"});
     await pm.recordUrl(p1.browserId, "https://www.facebook.com/messages");
 
     // Reload with fresh ProfileManager instance
@@ -238,7 +237,7 @@ test("I. Profile/session cũ không bị mất sau cập nhật", async () => {
   }
 });
 
-test("J. Account change không dùng lại session của Account khác", async () => {
+test("J. Account change bị chặn để không dùng lại session của Account khác", async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "client-test-j-"));
   try {
     let sessionResetFired = false;
@@ -251,8 +250,7 @@ test("J. Account change không dùng lại session của Account khác", async (
     });
     await pm.initialize();
 
-    const p = await pm.create("Multi Account Profile", "facebook");
-    await pm.bindAccount(p.browserId, "acc-A", "Account Alpha", "alpha@fb.com");
+    const p = await pm.create("Multi Account Profile", "facebook", {accountId:"acc-A",boundAt:new Date().toISOString(),accountName:"Account Alpha",email:"alpha@fb.com"});
     await pm.updateSessionSignal(p.browserId, {
       status: "present",
       checkedAt: "2026-10-26T12:00:00Z",
@@ -268,22 +266,10 @@ test("J. Account change không dùng lại session của Account khác", async (
     };
 
     // Switch Account Alpha -> Account Beta
-    const switched = await pm.bindAccount(p.browserId, "acc-B", "Account Beta", "beta@fb.com");
-
-    assert.equal(switched.accountBinding?.accountId, "acc-B");
-    assert.equal(switched.accountBinding?.accountName, "Account Beta");
-    assert.equal(switched.accountBinding?.email, "beta@fb.com");
-
-    // Execution confirmation MUST be reset to not_run
-    assert.equal(switched.executionConfirmation?.status, "not_run");
-    assert.equal(switched.executionConfirmation?.lastRunId, null);
-
-    // Session signal MUST be reset to unknown
-    assert.equal(switched.sessionSignal?.status, "unknown");
-
-    // Partition reset hook was triggered to clear storage data
-    assert.equal(sessionResetFired, true);
-    assert.equal(wipedPartition, p.partition);
+    await assert.rejects(pm.bindAccount(p.browserId, "acc-B", "Account Beta", "beta@fb.com"), /bất biến/);
+    assert.equal(pm.get(p.browserId)?.accountBinding?.accountId, "acc-A");
+    assert.equal(sessionResetFired, false);
+    assert.equal(wipedPartition, "");
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
@@ -369,7 +355,7 @@ test("M. isDomainMatchingAccount checks domain vs account platform / siteUrl", (
   );
 });
 
-test("N. bindAccount updates profile platform when passed", async () => {
+test("N. bindAccount cannot change profile platform/account", async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "client-test-n-"));
   try {
     const pm = new ProfileManager(tmpDir);
@@ -388,18 +374,15 @@ test("N. bindAccount updates profile platform when passed", async () => {
     assert.equal(created.profile.platform, "facebook");
 
     // Rebind to a WordPress account with platform passed
-    const updated = await pm.bindAccount(
+    await assert.rejects(pm.bindAccount(
       created.profile.browserId,
       "acc-new-wp",
       "test WP",
       "wp_user@mayhopphat.com",
       "https://mayhopphat.com/wp-login.php",
       "wordpress"
-    );
-
-    assert.equal(updated.platform, "wordpress", "Platform should update to wordpress");
-    assert.equal(updated.accountBinding?.accountId, "acc-new-wp");
-    assert.equal(updated.accountBinding?.siteUrl, "https://mayhopphat.com/wp-login.php");
+    ), /bất biến/);
+    assert.equal(pm.get(created.profile.browserId)?.platform, "facebook");
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }

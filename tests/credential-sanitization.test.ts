@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { sanitizeLog } from "../src/main/main-error-log.js";
-import { formatClientHttpError, SeoOpsHttpError } from "../src/shared/seo-ops-http.js";
+import { formatClientHttpError, readSeoOpsJson, SeoOpsHttpError } from "../src/shared/seo-ops-http.js";
 
 test("Log sanitization: never leaks API keys or Bearer tokens", () => {
   const secretKey = "rpa_client_dummy_sample_key_for_sanitization_test_only_00000";
@@ -38,4 +38,24 @@ test("HttpError formatting: clear user-facing messages without leaking tokens", 
 
   const netErr = new Error("fetch failed: connect ECONNREFUSED 127.0.0.1:443");
   assert.strictEqual(formatClientHttpError(netErr), "Không thể kết nối đến máy chủ. Endpoint không khả dụng.");
+});
+
+test("422 validation diagnostics expose safe contract errors without credentials", async () => {
+  const secret = "rpa_client_secret_that_must_never_be_logged";
+  const response = new Response(JSON.stringify({
+    errors: ["device_id_required", `Bearer ${secret}`],
+  }), {
+    status: 422,
+    headers: { "content-type": "application/json" },
+  });
+
+  await assert.rejects(
+    () => readSeoOpsJson(response, "POST", "https://seo-ops.test/api/v1/social-automation/client/register"),
+    (error: unknown) => {
+      assert.ok(error instanceof SeoOpsHttpError);
+      assert.match(error.message, /device_id_required/);
+      assert.ok(!error.message.includes(secret));
+      return true;
+    },
+  );
 });

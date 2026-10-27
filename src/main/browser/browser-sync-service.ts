@@ -1,4 +1,5 @@
 import type { BrowserProfile, AccountInfo } from "../../shared/contracts.js";
+import type { AccountDetail } from "../../shared/contracts.js";
 import type { ClientConnection } from "../connection/client-connection.js";
 import type { ProfileManager } from "./profile-manager.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
@@ -17,9 +18,9 @@ export interface TargetBrowserPayload {
     account_name?: string;
   };
   session_signal: {
-    status: "present" | "absent" | "unknown";
+    status: "present" | "absent" | "unsupported" | "error" | "unknown";
     checked_at: string | null;
-    method: "facebook_c_user_cookie" | "site_cookie_presence" | null;
+    method: "facebook_c_user_cookie" | "wordpress_auth_cookie" | "site_cookie_presence" | null;
   };
   execution_confirmation: {
     status: "not_run" | "pending_review" | "confirmed" | "failed";
@@ -31,7 +32,7 @@ export interface TargetBrowserPayload {
 }
 
 export function sanitizeProfilesForSync(profiles: BrowserProfile[]): TargetBrowserPayload[] {
-  return profiles.map((p) => ({
+  return profiles.filter((p) => Boolean(p.accountBinding?.accountId) && p.sessionSignal?.status === "present").map((p) => ({
     browser_id: p.browserId,
     name: p.name,
     platform: p.platform || "facebook",
@@ -72,17 +73,21 @@ export function sanitizeProfilesForSync(profiles: BrowserProfile[]): TargetBrows
 export class BrowserSyncService {
   private pendingSync = false;
   private syncing = false;
+  private wasOnline = false;
 
   constructor(
     private readonly connection: ClientConnection,
-    private readonly profileManager: ProfileManager
+    private readonly profileManager: ProfileManager,
+    private readonly onProfilesRefreshed?: () => void,
   ) {
     // Re-sync when connection comes online
     this.connection.onStateChange((state) => {
-      if (state.status === "connected" && state.online && this.pendingSync) {
-        logClientEvent("Connection restored, flushing pending browser sync");
+      const online = state.status === "connected" && state.online;
+      if (online && (!this.wasOnline || this.pendingSync)) {
+        logClientEvent("Connection available, synchronizing eligible browser sessions");
         void this.syncAll();
       }
+      this.wasOnline = online;
     });
   }
 
@@ -114,6 +119,68 @@ export class BrowserSyncService {
     }
   }
 
+  async getAccount(accountId: string): Promise<AccountDetail> {
+    const res = await this.connection.requestWithAuth(
+      `/api/v1/social-automation/client/accounts/${encodeURIComponent(accountId)}`,
+      "GET"
+    );
+    const a = res.account as Record<string, unknown>;
+    return {
+      accountId: String(a.account_id),
+      platform: String(a.platform),
+      displayName: String(a.display_name),
+      username: null,
+      email: a.email ? String(a.email) : null,
+      siteUrl: a.site_url ? String(a.site_url) : null,
+      hasPassword: a.password_status === "available" || a.password_status === "forbidden",
+      passwordStatus: String(a.password_status) as AccountDetail["passwordStatus"],
+      identityLabel: null,
+      verified: false,
+    };
+  }
+
+  async getAccountPassword(accountId: string): Promise<string> {
+    const res = await this.connection.requestWithAuth(
+      `/api/v1/social-automation/client/accounts/${encodeURIComponent(accountId)}/password`,
+      "GET"
+    );
+    if (typeof res.password !== "string") throw new Error("Password response is invalid");
+    return res.password;
+  }
+
+  async getAccountEmail(accountId: string): Promise<string> {
+    const account = await this.getAccount(accountId);
+    if (!account.email) throw new Error("Account chưa có email");
+    return account.email;
+  }
+
+  async getNotifications(): Promise<Array<Record<string, unknown>>> {
+    if (!this.connection.isOnline()) return [];
+    const res = await this.connection.requestWithAuth("/api/v1/social-automation/client/notifications", "GET");
+    return Array.isArray(res.notifications) ? res.notifications as Array<Record<string, unknown>> : [];
+  }
+
+  async acknowledgeNotification(notificationId: string): Promise<boolean> {
+    const res = await this.connection.requestWithAuth(
+      `/api/v1/social-automation/client/notifications/${encodeURIComponent(notificationId)}/ack`, "POST", {}
+    );
+    return Boolean(res.acked);
+  }
+
+  async refreshAccountMetadata(): Promise<void> {
+    if (!this.connection.isOnline()) return;
+    for (const profile of this.profileManager.list()) {
+      const accountId = profile.accountBinding?.accountId;
+      if (!accountId) continue;
+      try {
+        await this.profileManager.refreshAccountMetadata(profile.browserId, await this.getAccount(accountId));
+      } catch (err) {
+        logClientError("Unable to refresh Account metadata", err);
+      }
+    }
+    this.onProfilesRefreshed?.();
+  }
+
   async syncAll(): Promise<boolean> {
     if (this.syncing) {
       this.pendingSync = true;
@@ -128,6 +195,7 @@ export class BrowserSyncService {
 
     this.syncing = true;
     try {
+      await this.refreshAccountMetadata();
       const profiles = this.profileManager.list();
       const browsers = sanitizeProfilesForSync(profiles);
       const deviceId = this.connection.getDeviceId();

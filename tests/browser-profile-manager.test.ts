@@ -11,25 +11,19 @@ test("ProfileManager: creates profile with durable UUID and immutable partition"
     const pm = new ProfileManager(tmpDir);
     await pm.initialize();
 
-    const p1 = await pm.create("Facebook Marketing 01", "facebook");
+    const p1 = await pm.create("Facebook Marketing 01", "facebook", { accountId: "acc-1", boundAt: new Date().toISOString() });
     assert.ok(p1.browserId);
     assert.equal(p1.name, "Facebook Marketing 01");
     assert.equal(p1.platform, "facebook");
     assert.equal(p1.partition, `persist:rpa-client-${p1.browserId}`);
     assert.equal(p1.status, "stopped");
 
-    // Rename preserves browserId and partition
-    const renamed = await pm.rename(p1.browserId, "Facebook Group Seeding");
-    assert.equal(renamed.browserId, p1.browserId);
-    assert.equal(renamed.name, "Facebook Group Seeding");
-    assert.equal(renamed.partition, p1.partition);
-
     // Persistence reload
     const pm2 = new ProfileManager(tmpDir);
     await pm2.initialize();
     const loaded = pm2.get(p1.browserId);
     assert.ok(loaded);
-    assert.equal(loaded?.name, "Facebook Group Seeding");
+    assert.equal(loaded?.name, "Facebook Marketing 01");
     assert.equal(loaded?.partition, `persist:rpa-client-${p1.browserId}`);
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
@@ -42,8 +36,8 @@ test("ProfileManager: single running browser enforcement", async () => {
     const pm = new ProfileManager(tmpDir);
     await pm.initialize();
 
-    const p1 = await pm.create("Profile 1");
-    const p2 = await pm.create("Profile 2");
+    const p1 = await pm.create("Profile 1", "facebook", { accountId: "acc-1", boundAt: new Date().toISOString() });
+    const p2 = await pm.create("Profile 2", "facebook", { accountId: "acc-2", boundAt: new Date().toISOString() });
 
     await pm.setStatus(p1.browserId, "running");
     assert.equal(pm.getActiveId(), p1.browserId);
@@ -70,7 +64,7 @@ test("ProfileManager: deletion safety", async () => {
     const pm = new ProfileManager(tmpDir);
     await pm.initialize();
 
-    const p1 = await pm.create("Profile To Delete");
+    const p1 = await pm.create("Profile To Delete", "facebook", { accountId: "acc-delete", boundAt: new Date().toISOString() });
     await pm.setStatus(p1.browserId, "running");
 
     // Cannot delete active running profile

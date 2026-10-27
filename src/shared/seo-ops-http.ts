@@ -97,6 +97,14 @@ export async function readSeoOpsJson(
   }
 
   if (!response.ok) {
+    const validationErrors = Array.isArray(parsedBody?.errors)
+      ? parsedBody.errors.filter((item): item is string => typeof item === "string")
+          .map((item) => item
+            .replace(/Bearer\s+\S+|rpa_[A-Za-z0-9_-]+/gi, "[redacted]")
+            .replace(/[^A-Za-z0-9_.:\[\]-]/g, "")
+            .slice(0, 120))
+          .filter(Boolean).slice(0, 5)
+      : [];
     throw new SeoOpsHttpError({
       method,
       endpoint,
@@ -106,7 +114,9 @@ export async function readSeoOpsJson(
       retryAfterSeconds,
       category,
       serverErrorCode: typeof parsedBody?.error === "string" ? parsedBody.error : undefined,
-      serverErrorMessage: typeof parsedBody?.message === "string" ? parsedBody.message : undefined,
+      serverErrorMessage: typeof parsedBody?.message === "string"
+        ? parsedBody.message.replace(/Bearer\s+\S+|rpa_[A-Za-z0-9_-]+/gi, "[redacted]").slice(0, 500)
+        : validationErrors.length ? validationErrors.join(",") : undefined,
     });
   }
 

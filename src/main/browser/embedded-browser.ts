@@ -2,7 +2,8 @@ import { WebContentsView, session, type BrowserWindow } from "electron";
 import type { BrowserProfile, BrowserViewState, SessionSignal } from "../../shared/contracts.js";
 import type { ProfileManager } from "./profile-manager.js";
 import type { BrowserSyncService } from "./browser-sync-service.js";
-import { resolveInitialUrl, isDomainMatchingAccount } from "./url-resolver.js";
+import { resolveInitialUrl } from "./url-resolver.js";
+import { evaluateSessionCookies, resolveSessionStrategy } from "./session-signal-strategy.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
 
 export class EmbeddedBrowser {
@@ -312,7 +313,7 @@ export class EmbeddedBrowser {
   }
 
   /**
-   * E5.2: Detect session presence signal (e.g. c_user cookie on Facebook).
+   * Detect a site-specific authentication cookie in the profile's persistent partition.
    * Strict security rule: Only checks presence (true/false).
    * NEVER saves, logs, displays, or transmits cookie value.
    * Requirement 5: Do NOT assign session signal of unrelated website to current account.
@@ -328,105 +329,48 @@ export class EmbeddedBrowser {
       return { status: "unknown", checkedAt: null, method: null };
     }
 
-    const normPlatform = (profile.platform || "").toLowerCase();
-
-    // Check if the current website domain matches the bound Account
-    const matchesAccount = isDomainMatchingAccount(
-      normPlatform,
-      profile.accountBinding?.siteUrl,
-      this.currentUrl
-    );
-
-    if (this.currentUrl && !matchesAccount) {
-      logClientEvent("Current website domain does not match account, skipping session signal update", {
-        browserId: targetId,
-        currentUrl: this.currentUrl,
-        accountPlatform: normPlatform,
-      });
-      return profile.sessionSignal || { status: "unknown", checkedAt: null, method: null };
-    }
-
-    if (normPlatform === "facebook" || normPlatform === "fb") {
-      try {
-        let hasCUser = false;
-        if (this.view && this.activeBrowserId === targetId) {
-          const cookies = await this.view.webContents.session.cookies.get({ name: "c_user" });
-          hasCUser = cookies.length > 0;
-        } else {
-          const sess = session.fromPartition(profile.partition);
-          const cookies = await sess.cookies.get({ name: "c_user" });
-          hasCUser = cookies.length > 0;
-        }
-
-        const signal: SessionSignal = {
-          status: hasCUser ? "present" : "absent",
-          checkedAt: new Date().toISOString(),
-          method: "facebook_c_user_cookie",
-        };
-
-        logClientEvent("Checked session signal for profile", {
-          browserId: targetId,
-          status: signal.status,
-          method: signal.method,
-        });
-
-        await this.profileManager.updateSessionSignal(targetId, signal);
-        void this.syncService.syncAll();
-        return signal;
-      } catch (err) {
-        logClientError("Error checking session signal", err);
-      }
-    }
-
-    // Generic fallback for other platforms / websites
     const targetUrl =
       this.activeBrowserId === targetId && this.currentUrl
         ? this.currentUrl
         : profile.lastUrl || profile.accountBinding?.siteUrl || "";
-
-    if (targetUrl) {
-      try {
-        const parsed = new URL(targetUrl);
-        if (["http:", "https:"].includes(parsed.protocol)) {
-          let hasCookies = false;
-          if (this.view && this.activeBrowserId === targetId) {
-            const cookies = await this.view.webContents.session.cookies.get({ url: parsed.href });
-            hasCookies = cookies.length > 0;
-          } else {
-            const sess = session.fromPartition(profile.partition);
-            const cookies = await sess.cookies.get({ url: parsed.href });
-            hasCookies = cookies.length > 0;
-          }
-
-          const signal: SessionSignal = {
-            status: hasCookies ? "present" : "absent",
-            checkedAt: new Date().toISOString(),
-            method: "site_cookie_presence",
-          };
-
-          logClientEvent("Checked generic session signal for profile", {
-            browserId: targetId,
-            status: signal.status,
-            method: signal.method,
-            origin: parsed.origin,
-          });
-
-          await this.profileManager.updateSessionSignal(targetId, signal);
-          void this.syncService.syncAll();
-          return signal;
-        }
-      } catch (err) {
-        logClientError("Error checking generic session signal", err);
-      }
+    if (!targetUrl) {
+      const unsupported: SessionSignal = { status: "unsupported", checkedAt: new Date().toISOString(), method: null };
+      await this.profileManager.updateSessionSignal(targetId, unsupported);
+      return unsupported;
     }
 
-    const fallbackSignal: SessionSignal = {
-      status: "unknown",
-      checkedAt: new Date().toISOString(),
-      method: null,
-    };
-    await this.profileManager.updateSessionSignal(targetId, fallbackSignal);
-    return fallbackSignal;
+    try {
+      const parsed = new URL(targetUrl);
+      const strategy = resolveSessionStrategy(parsed.href, profile.accountBinding?.siteUrl);
+      const profileSession = session.fromPartition(profile.partition);
+      const cookies = strategy === "facebook"
+        ? await profileSession.cookies.get({ url: parsed.origin, name: "c_user" })
+        : strategy === "wordpress"
+          ? await profileSession.cookies.get({ url: parsed.href })
+          : [];
+      const signal = evaluateSessionCookies(strategy, cookies, new Date().toISOString());
+
+      logClientEvent("Checked session signal for profile", {
+        browserId: targetId,
+        status: signal.status,
+        method: signal.method,
+        partition: profile.partition,
+        origin: parsed.origin,
+      });
+      await this.profileManager.updateSessionSignal(targetId, signal);
+      void this.syncService.syncAll();
+      return signal;
+    } catch (err) {
+      logClientError("Error checking session signal", err);
+      const failure: SessionSignal = {
+        status: "error",
+        checkedAt: new Date().toISOString(),
+        method: null,
+        error: "Không thể đọc cookie từ Browser Profile.",
+      };
+      await this.profileManager.updateSessionSignal(targetId, failure);
+      return failure;
+    }
   }
 
   goBack(): void {

@@ -539,6 +539,76 @@ body {
   box-shadow: 0 0 12px rgba(59, 130, 246, 0.15);
 }
 
+.profile-technical-details {
+  margin-top: 10px;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.profile-technical-details summary {
+  cursor: pointer;
+  color: #94a3b8;
+}
+
+.profile-technical-details div {
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+}
+
+.notification-center {
+  margin-bottom: 14px;
+  border: 1px solid #f59e0b55;
+  border-radius: 10px;
+  background: #fffbeb;
+  padding: 12px;
+  color: #0f172a;
+}
+
+.notification-center-title {
+  margin-bottom: 8px;
+  color: #92400e;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+.notification-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 9px 0;
+}
+
+.notification-item + .notification-item {
+  border-top: 1px solid #f59e0b33;
+}
+
+.notification-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.notification-copy span {
+  color: #475569;
+}
+
+.notification-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .notification-item {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
 .profile-header {
   display: flex;
   justify-content: space-between;

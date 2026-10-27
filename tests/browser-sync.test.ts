@@ -60,7 +60,7 @@ test("BrowserSync: formats target metadata schema and strictly omits forbidden f
 
   const sanitized = sanitizeProfilesForSync(profiles);
 
-  assert.equal(sanitized.length, 3);
+  assert.equal(sanitized.length, 1, "local profiles without both Account and session signal stay local");
 
   // Target schema verification for profile 1
   assert.equal(sanitized[0].browser_id, "b3f36077-9ca6-4d26-a94f-a7f45b331001");
@@ -84,26 +84,6 @@ test("BrowserSync: formats target metadata schema and strictly omits forbidden f
     last_success_at: null,
     last_run_id: null,
     screenshot_ref: null,
-  });
-
-  // Verify unbound defaults for profile 2
-  assert.deepEqual(sanitized[1].account_binding, {
-    account_id: null,
-    bound_at: null,
-  });
-  assert.deepEqual(sanitized[1].session_signal, {
-    status: "unknown",
-    checked_at: null,
-    method: null,
-  });
-
-  // Verify generic site session signal for profile 3
-  assert.equal(sanitized[2].browser_id, "b3f36077-9ca6-4d26-a94f-a7f45b331003");
-  assert.equal(sanitized[2].platform, "general");
-  assert.deepEqual(sanitized[2].session_signal, {
-    status: "present",
-    checked_at: "2026-10-26T12:10:00Z",
-    method: "site_cookie_presence",
   });
 
   // Verify none of forbidden keys exist anywhere in payload

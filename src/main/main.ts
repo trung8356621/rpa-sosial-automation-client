@@ -12,6 +12,7 @@ import { ProfileManager } from "./browser/profile-manager.js";
 import { BrowserSyncService } from "./browser/browser-sync-service.js";
 import { EmbeddedBrowser } from "./browser/embedded-browser.js";
 import type { ClientCommand, BrowserStateSnapshot } from "../shared/contracts.js";
+import { ClipboardService } from "./clipboard/clipboard-service.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const project = path.resolve(root, "..");
@@ -22,7 +23,7 @@ const isCaptureM4 = process.argv.includes("--capture-m4");
 const autoConnectKey = process.argv.find((a) => a.startsWith("--connect-key="))?.split("=")[1];
 
 // Windows userData is strictly isolated to .local/client (never .local/creator)
-const userDataPath = path.join(project, ".local", "client");
+const userDataPath = app.isPackaged ? app.getPath("userData") : path.join(project, ".local", "client");
 app.setPath("userData", userDataPath);
 app.setPath("sessionData", path.join(userDataPath, "chromium"));
 
@@ -47,6 +48,15 @@ const connection = new ClientConnection(store, credentials, deviceManager);
 const profileManager = new ProfileManager(userDataPath);
 let syncService: BrowserSyncService | null = null;
 let embeddedBrowser: EmbeddedBrowser | null = null;
+const clipboardService = new ClipboardService(clipboard);
+
+function assertActiveAccount(accountId: string): void {
+  const activeBrowserId = embeddedBrowser?.getActiveBrowserId();
+  const activeAccountId = activeBrowserId ? profileManager.get(activeBrowserId)?.accountBinding?.accountId : null;
+  if (!activeAccountId || activeAccountId !== accountId) {
+    throw new Error("Account đang active đã thay đổi. Vui lòng thử lại.");
+  }
+}
 
 function getBrowserStateSnapshot(): BrowserStateSnapshot {
   return {
@@ -146,7 +156,7 @@ async function bootstrap() {
 
   mainWindow = createWindow();
 
-  syncService = new BrowserSyncService(connection, profileManager);
+  syncService = new BrowserSyncService(connection, profileManager, broadcastBrowserState);
   embeddedBrowser = new EmbeddedBrowser(mainWindow, profileManager, syncService);
 
   embeddedBrowser.onViewStateChange(() => {
@@ -198,6 +208,7 @@ async function bootstrap() {
 
       // Browser profile commands
       case "getBrowserState":
+        await syncService?.refreshAccountMetadata();
         return getBrowserStateSnapshot();
       case "createBrowserProfile": {
         if (cmd.account) {
@@ -213,12 +224,6 @@ async function bootstrap() {
         void syncService?.syncAll();
         broadcastBrowserState();
         return res;
-      }
-      case "renameBrowserProfile": {
-        const updated = await profileManager.rename(cmd.browserId, cmd.name);
-        void syncService?.syncAll();
-        broadcastBrowserState();
-        return updated;
       }
       case "deleteBrowserProfile": {
         const ok = await profileManager.delete(cmd.browserId);
@@ -266,6 +271,33 @@ async function bootstrap() {
       case "getAccounts": {
         return await syncService!.getAccounts(cmd.platform);
       }
+      case "getAccount": {
+        return await syncService!.getAccount(cmd.accountId);
+      }
+      case "getNotifications": {
+        return await syncService!.getNotifications();
+      }
+      case "ackNotification": {
+        return await syncService!.acknowledgeNotification(cmd.notificationId);
+      }
+      case "copyAccountEmail": {
+        await clipboardService.copy(async () => {
+          assertActiveAccount(cmd.accountId);
+          const email = await syncService!.getAccountEmail(cmd.accountId);
+          assertActiveAccount(cmd.accountId);
+          return email;
+        });
+        return true;
+      }
+      case "copyAccountPassword": {
+        await clipboardService.copy(async () => {
+          assertActiveAccount(cmd.accountId);
+          const password = await syncService!.getAccountPassword(cmd.accountId);
+          assertActiveAccount(cmd.accountId);
+          return password;
+        });
+        return true;
+      }
       case "bindAccount": {
         const updated = await profileManager.bindAccount(
           cmd.browserId,
@@ -290,11 +322,6 @@ async function bootstrap() {
         broadcastBrowserState();
         return signal;
       }
-      case "copyToClipboard": {
-        clipboard.writeText(cmd.text);
-        return true;
-      }
-
       default:
         throw new Error(`Unknown command type: ${(cmd as { type: string }).type}`);
     }
