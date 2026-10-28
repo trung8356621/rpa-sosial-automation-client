@@ -12,11 +12,6 @@ export function DeviceStatusPanel({ state, onUpdate }: Props) {
   const [busy, setBusy] = useState(false);
 
   const device = state.device;
-  const shortDeviceId = device?.deviceId
-    ? device.deviceId.length > 20
-      ? `${device.deviceId.slice(0, 12)}...${device.deviceId.slice(-6)}`
-      : device.deviceId
-    : "—";
 
   async function handleSaveName() {
     if (!nameInput.trim()) return;
@@ -47,7 +42,7 @@ export function DeviceStatusPanel({ state, onUpdate }: Props) {
   return (
     <div className="card">
       <div className="card-title">
-        <span>Thông tin thiết bị (Device Identity)</span>
+        <span>Thông tin Client</span>
         {state.status === "connected" && (
           <button
             type="button"
@@ -61,12 +56,12 @@ export function DeviceStatusPanel({ state, onUpdate }: Props) {
         )}
       </div>
       <div className="card-desc">
-        Mỗi máy trạm cài đặt RPA Client sở hữu một Device ID ngẫu nhiên, không thay đổi sau khi tạo.
+        Định danh Client là Client API Key do SEO-OPS cấp. Không dùng Device UUID độc lập.
       </div>
 
       <div className="info-grid">
         <div className="info-item">
-          <div className="info-label">Tên hiển thị</div>
+          <div className="info-label">Tên hiển thị máy</div>
           {editingName ? (
             <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
               <input
@@ -112,10 +107,13 @@ export function DeviceStatusPanel({ state, onUpdate }: Props) {
         </div>
 
         <div className="info-item">
-          <div className="info-label">Device ID</div>
-          <div className="info-value" title={device?.deviceId}>
-            {shortDeviceId}
-          </div>
+          <div className="info-label">Client API Key ID</div>
+          <div className="info-value">{state.clientApiKeyId ?? "—"}</div>
+        </div>
+
+        <div className="info-item">
+          <div className="info-label">Key prefix</div>
+          <div className="info-value">{state.keyPrefix || "—"}</div>
         </div>
 
         <div className="info-item">
@@ -131,6 +129,11 @@ export function DeviceStatusPanel({ state, onUpdate }: Props) {
         <div className="info-item">
           <div className="info-label">SEO-OPS Agent UUID</div>
           <div className="info-value">{state.agentUuid || "Chưa đăng ký"}</div>
+        </div>
+
+        <div className="info-item">
+          <div className="info-label">Connection lease</div>
+          <div className="info-value">{state.hasConnectionToken ? "Đang giữ" : "Chưa có"}</div>
         </div>
 
         <div className="info-item">

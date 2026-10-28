@@ -13,7 +13,7 @@ test("ProfileManager: creates profile with durable UUID and immutable partition"
 
     const p1 = await pm.create("Facebook Marketing 01", "facebook", { accountId: "acc-1", boundAt: new Date().toISOString() });
     assert.ok(p1.browserId);
-    assert.equal(p1.name, "Facebook Marketing 01");
+    assert.equal(p1.accountBinding?.accountName || p1.name, "Facebook Marketing 01");
     assert.equal(p1.platform, "facebook");
     assert.equal(p1.partition, `persist:rpa-client-${p1.browserId}`);
     assert.equal(p1.status, "stopped");
@@ -23,7 +23,7 @@ test("ProfileManager: creates profile with durable UUID and immutable partition"
     await pm2.initialize();
     const loaded = pm2.get(p1.browserId);
     assert.ok(loaded);
-    assert.equal(loaded?.name, "Facebook Marketing 01");
+    assert.equal(loaded?.accountBinding?.accountName || loaded?.name, "Facebook Marketing 01");
     assert.equal(loaded?.partition, `persist:rpa-client-${p1.browserId}`);
   } finally {
     await rm(tmpDir, { recursive: true, force: true });

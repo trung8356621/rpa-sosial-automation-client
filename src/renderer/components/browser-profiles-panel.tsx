@@ -496,7 +496,7 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
                             {acc.hasPassword ? "🔑 Đã lưu mật khẩu" : "Chưa lưu mật khẩu"}
                             {existingProfile && !modalTargetProfile && (
                               <span style={{ marginLeft: 8, color: "#34d399" }}>
-                                • Đã có Profile: {existingProfile.name}
+                                • Đã có Profile: {existingProfile.accountBinding?.accountName || existingProfile.accountBinding?.accountId}
                               </span>
                             )}
                           </div>

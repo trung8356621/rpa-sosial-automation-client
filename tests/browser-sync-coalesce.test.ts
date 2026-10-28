@@ -34,7 +34,6 @@ test("concurrent syncAll awaits the newest successful snapshot", async () => {
   const connection = {
     onStateChange: () => () => undefined,
     isOnline: () => true,
-    getDeviceId: () => "device-1",
     requestWithAuth: async (path: string, _method: string, body?: Record<string, unknown>) => {
       if (path.includes("/accounts/")) {
         return {
@@ -82,7 +81,6 @@ test("confirmLogin surfaces sanitized server failure without throwing", async ()
   const connection = {
     onStateChange: () => () => undefined,
     isOnline: () => true,
-    getDeviceId: () => "device-1",
     requestWithAuth: async () => {
       throw new SeoOpsHttpError({
         method: "POST",
@@ -127,7 +125,6 @@ test("ACK failure path is independent of confirmLogin success shape", async () =
   const connection = {
     onStateChange: () => () => undefined,
     isOnline: () => true,
-    getDeviceId: () => "device-1",
     requestWithAuth: async (path: string) => {
       if (path.includes("session-confirm-login")) {
         return { ok: true, session_state: "candidate", dispatch_enabled: false };

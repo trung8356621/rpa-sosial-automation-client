@@ -13,7 +13,7 @@ import {
 
 export interface TargetBrowserPayload {
   browser_id: string;
-  name: string;
+  account_name?: string;
   platform: string;
   status: "stopped" | "running" | "error";
   runtime: {
@@ -48,7 +48,7 @@ export function sanitizeProfilesForSync(profiles: BrowserProfile[]): TargetBrows
     && Boolean(p.sessionSignal?.checkedAt)
     && p.sessionSignal?.status !== "unknown").map((p) => ({
     browser_id: p.browserId,
-    name: p.name,
+    account_name: p.accountBinding?.accountName ?? undefined,
     platform: p.platform || "facebook",
     status: p.status,
     runtime: { status: p.status },
@@ -319,13 +319,11 @@ export class BrowserSyncService {
       await this.refreshAccountMetadata();
       const profiles = this.profileManager.list();
       const browsers = sanitizeProfilesForSync(profiles);
-      const deviceId = this.connection.getDeviceId();
 
       const response = await this.connection.requestWithAuth(
         "/api/v1/social-automation/client/browser-sync",
         "POST",
         {
-          device_id: deviceId,
           browsers,
         }
       );
@@ -353,12 +351,10 @@ export class BrowserSyncService {
     }
 
     try {
-      const deviceId = this.connection.getDeviceId();
       const res = await this.connection.requestWithAuth(
         "/api/v1/social-automation/client/browser-delete",
         "POST",
         {
-          device_id: deviceId,
           browser_id: browserId,
         }
       );

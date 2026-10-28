@@ -1,39 +1,50 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import os from "node:os";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { DeviceManager } from "../src/main/device/device-manager.js";
 
-test("DeviceManager: generates and persists durable UUID device_id", async () => {
-  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "client-device-test-"));
+test("DeviceManager: host metadata only — no Device UUID", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "rpa-host-"));
   try {
-    const manager1 = new DeviceManager(tmpDir);
-    const info1 = await manager1.initialize();
+    const dm1 = new DeviceManager(dir);
+    const info1 = await dm1.initialize();
+    assert.ok(info1.displayName);
+    assert.ok(info1.osFamily);
+    assert.ok(info1.clientVersion);
+    assert.equal((info1 as { deviceId?: string }).deviceId, undefined);
 
-    assert.ok(info1.deviceId.startsWith("dev_"), "deviceId must have dev_ prefix");
-    assert.ok(info1.deviceId.length > 20, "deviceId must be UUID format");
-    assert.strictEqual(info1.clientVersion, "0.1.0");
-    assert.ok(["windows", "linux", "macos", "other"].includes(info1.osFamily));
-    assert.ok(typeof info1.osLabel === "string" && info1.osLabel.length > 0);
+    const dm2 = new DeviceManager(dir);
+    const info2 = await dm2.initialize();
+    assert.equal(info2.displayName, info1.displayName);
 
-    // Second initialization with same userData path must yield identical deviceId
-    const manager2 = new DeviceManager(tmpDir);
-    const info2 = await manager2.initialize();
+    await dm2.setDisplayName("Station A");
+    const dm3 = new DeviceManager(dir);
+    const info3 = await dm3.initialize();
+    assert.equal(info3.displayName, "Station A");
 
-    assert.strictEqual(info2.deviceId, info1.deviceId, "Device ID must persist across restarts");
-
-    // Display name update
-    await manager2.setDisplayName("Office Workstation #1");
-    const info3 = manager2.getDeviceInfo();
-    assert.strictEqual(info3.displayName, "Office Workstation #1");
-
-    // Check persistence of display name
-    const manager3 = new DeviceManager(tmpDir);
-    const info4 = await manager3.initialize();
-    assert.strictEqual(info4.displayName, "Office Workstation #1");
-    assert.strictEqual(info4.deviceId, info1.deviceId);
+    const raw = JSON.parse(await readFile(path.join(dir, "host-meta.json"), "utf8"));
+    assert.equal(raw.deviceId, undefined);
+    assert.equal(raw.displayName, "Station A");
   } finally {
-    await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("DeviceManager: migrates displayName from legacy device.json, ignores deviceId", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "rpa-host-legacy-"));
+  try {
+    await writeFile(
+      path.join(dir, "device.json"),
+      JSON.stringify({ deviceId: "dev_should_be_ignored", displayName: "Legacy Host" }),
+      "utf8"
+    );
+    const dm = new DeviceManager(dir);
+    const info = await dm.initialize();
+    assert.equal(info.displayName, "Legacy Host");
+    assert.equal((info as { deviceId?: string }).deviceId, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });

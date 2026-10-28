@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { AccountBinding, AccountInfo, BrowserProfile, SessionSignal } from "../../shared/contracts.js";
+// AccountInfo used by deprecated create() → createForAccount bridge.
 import { logClientError, logClientEvent } from "../main-error-log.js";
 
 function validateName(name: string): string {
@@ -31,20 +32,24 @@ export class ProfileManager {
       if (data.trim().length > 0) {
         const parsed = JSON.parse(data);
         if (Array.isArray(parsed)) {
-          this.profiles = parsed.map((p) => ({
-            ...p,
-            // When starting up after restart or crash, all browsers must start as 'stopped'
-            status: "stopped" as const,
-            accountBinding: p.accountBinding || { accountId: null, boundAt: null },
-            sessionSignal: p.sessionSignal || { status: "unknown", checkedAt: null, method: null },
-            executionConfirmation: p.executionConfirmation || {
-              status: "not_run",
-              firstRunAt: null,
-              lastSuccessAt: null,
-              lastRunId: null,
-              screenshotRef: null,
-            },
-          }));
+          // Drop empty / unbound profiles — Browser requires Account ID.
+          this.profiles = parsed
+            .filter((p) => Boolean(p?.accountBinding?.accountId))
+            .map((p) => ({
+              ...p,
+              status: "stopped" as const,
+              // Display identity is Account Name; keep name only as optional legacy field.
+              name: p.accountBinding?.accountName || p.name,
+              accountBinding: p.accountBinding || { accountId: null, boundAt: null },
+              sessionSignal: p.sessionSignal || { status: "unknown", checkedAt: null, method: null },
+              executionConfirmation: p.executionConfirmation || {
+                status: "not_run",
+                firstRunAt: null,
+                lastSuccessAt: null,
+                lastRunId: null,
+                screenshotRef: null,
+              },
+            }));
         }
       }
     } catch (err: unknown) {
@@ -142,38 +147,25 @@ export class ProfileManager {
     return { profile, alreadyExists: false };
   }
 
-  async create(name: string, platform: string = "facebook", accountBinding?: AccountBinding): Promise<BrowserProfile> {
+  /**
+   * @deprecated Use createForAccount. Browser Name is not a business identity.
+   */
+  async create(_name: string, platform: string = "facebook", accountBinding?: AccountBinding): Promise<BrowserProfile> {
     if (!accountBinding?.accountId) {
       throw new Error("Không thể tạo Browser nếu chưa chọn Account.");
     }
-    const validName = validateName(name);
-    const browserId = randomUUID();
-    const now = new Date().toISOString();
-
-    const profile: BrowserProfile = {
-      browserId,
-      name: validName,
-      platform: platform.toLowerCase(),
-      // Partition is strictly tied to browserId and NEVER changes on rename
-      partition: `persist:rpa-client-${browserId}`,
-      status: "stopped",
-      accountBinding: accountBinding || { accountId: null, boundAt: null },
-      sessionSignal: { status: "unknown", checkedAt: null, method: null },
-      executionConfirmation: {
-        status: "not_run",
-        firstRunAt: null,
-        lastSuccessAt: null,
-        lastRunId: null,
-        screenshotRef: null,
-      },
-      createdAt: now,
-      updatedAt: now,
+    const account: AccountInfo = {
+      accountId: accountBinding.accountId,
+      platform,
+      displayName: accountBinding.accountName || _name || "Account",
+      username: null,
+      email: accountBinding.email ?? "legacy@local.test",
+      siteUrl: accountBinding.siteUrl ?? null,
+      identityLabel: null,
+      verified: true,
     };
-
-    this.profiles.push(profile);
-    await this.save();
-    logClientEvent("Created browser profile", { browserId, name: validName, platform });
-    return profile;
+    const res = await this.createForAccount(account);
+    return res.profile;
   }
 
   async bindAccount(

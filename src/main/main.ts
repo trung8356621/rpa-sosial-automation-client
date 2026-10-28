@@ -264,15 +264,6 @@ async function bootstrap() {
       case "getBrowserState":
         await syncService?.refreshAccountMetadata();
         return getBrowserStateSnapshot();
-      case "createBrowserProfile": {
-        if (cmd.account) {
-          const res = await profileManager.createForAccount(cmd.account);
-          void syncService?.syncAll();
-          broadcastBrowserState();
-          return res.profile;
-        }
-        throw new Error("Không thể tạo Browser nếu chưa chọn Account.");
-      }
       case "createBrowserForAccount": {
         const res = await profileManager.createForAccount(cmd.account);
         void syncService?.syncAll();

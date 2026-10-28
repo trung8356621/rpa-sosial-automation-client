@@ -72,7 +72,6 @@ test("D/E: remote apply updates only matching browser ids (restart/heartbeat pat
     onStateChange: () => () => undefined,
     onHeartbeatResponse: () => () => undefined,
     isOnline: () => true,
-    getDeviceId: () => "device-1",
     requestWithAuth: async () => ({ ok: true }),
   };
   const profileManager = {
@@ -115,7 +114,6 @@ test("F: sync upload and remote apply do not require ACK or task confirmation fi
     onStateChange: () => () => undefined,
     onHeartbeatResponse: () => () => undefined,
     isOnline: () => true,
-    getDeviceId: () => "device-1",
     requestWithAuth: async (path: string, _method: string, body?: Record<string, unknown>) => {
       if (path.includes("/accounts/")) {
         return {

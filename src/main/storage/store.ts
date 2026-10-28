@@ -5,6 +5,8 @@ export interface ClientSettings {
   endpoint: string;
   displayName?: string;
   agentUuid?: string;
+  /** Temporary connection lease from SEO-OPS (not Device identity). */
+  connectionToken?: string;
   lastConnectedAt?: string;
 }
 
@@ -27,6 +29,9 @@ export class ClientStore {
         endpoint: typeof parsed.endpoint === "string" && parsed.endpoint.trim() ? parsed.endpoint.trim() : "https://seo-ops.test",
         displayName: typeof parsed.displayName === "string" ? parsed.displayName.trim() : undefined,
         agentUuid: typeof parsed.agentUuid === "string" ? parsed.agentUuid.trim() : undefined,
+        connectionToken: typeof parsed.connectionToken === "string" && parsed.connectionToken.trim()
+          ? parsed.connectionToken.trim()
+          : undefined,
         lastConnectedAt: typeof parsed.lastConnectedAt === "string" ? parsed.lastConnectedAt : undefined,
       };
     } catch {

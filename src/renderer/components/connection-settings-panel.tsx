@@ -109,11 +109,31 @@ export function ConnectionSettingsPanel({ state, onUpdate }: Props) {
     }
   }
 
+  const statusLabel =
+    state.status === "connected"
+      ? state.online
+        ? "Đã kết nối (Online)"
+        : "Đã kết nối"
+      : state.status === "connecting"
+        ? "Đang kết nối..."
+        : state.status === "error"
+          ? "Lỗi kết nối"
+          : "Chưa kết nối";
+
   return (
     <div className="card">
       <div className="card-title">Cấu hình kết nối SEO-OPS</div>
       <div className="card-desc">
         Kết nối RPA Client với hệ thống SEO-OPS qua Endpoint và Client API Key.
+      </div>
+      <div
+        className={`connection-status-banner ${
+          state.status === "connected" ? "ok" : state.status === "connecting" ? "pending" : "locked"
+        }`}
+        role="status"
+      >
+        Trạng thái: <strong>{statusLabel}</strong>
+        {state.keyPrefix ? ` · Key ${state.keyPrefix}` : ""}
       </div>
 
       <div className="form-group">

@@ -227,7 +227,8 @@ test("I. Profile/session cũ không bị mất sau cập nhật", async () => {
     const loaded = pm2.get(p1.browserId);
     assert.ok(loaded);
     assert.equal(loaded?.browserId, p1.browserId);
-    assert.equal(loaded?.name, "Legacy Profile 01");
+    // Display identity is Account Name (Browser Name is not a business field).
+    assert.equal(loaded?.accountBinding?.accountName || loaded?.name, "Legacy Account");
     assert.equal(loaded?.partition, p1.partition);
     assert.equal(loaded?.accountBinding?.accountId, "legacy-acc-123");
     assert.equal(loaded?.accountBinding?.email, "legacy@fb.com");

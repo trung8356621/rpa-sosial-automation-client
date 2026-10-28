@@ -159,6 +159,55 @@ body {
   color: #38bdf8;
 }
 
+.nav-item.locked,
+.nav-item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  color: #64748b;
+}
+
+.nav-item.locked:hover,
+.nav-item:disabled:hover {
+  background: transparent;
+  color: #64748b;
+}
+
+.connection-lock-banner {
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid #7c2d12;
+  background: #431407;
+  color: #fed7aa;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.connection-status-banner {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.connection-status-banner.ok {
+  background: #052e16;
+  border: 1px solid #166534;
+  color: #bbf7d0;
+}
+
+.connection-status-banner.pending {
+  background: #1c1917;
+  border: 1px solid #a16207;
+  color: #fde68a;
+}
+
+.connection-status-banner.locked {
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #cbd5e1;
+}
+
 .main-content {
   flex: 1;
   padding: 24px;

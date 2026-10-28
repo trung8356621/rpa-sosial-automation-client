@@ -5,8 +5,8 @@ import type {
 
 export type { WindowsNotificationDisplayStatus, WindowsNotificationStatus };
 
+/** Host metadata only — Client identity is the Client API Key, not a Device UUID. */
 export interface DeviceInfo {
-  deviceId: string;
   displayName: string;
   platform: string;
   osVersion: string;
@@ -40,6 +40,9 @@ export interface ConnectionState {
   installation?: InstallationContext;
   device?: DeviceInfo;
   agentUuid?: string;
+  clientApiKeyId?: number;
+  /** Temporary connection lease token (not a Device identity). */
+  hasConnectionToken?: boolean;
   online: boolean;
   lastHeartbeatAt?: string;
   lastError?: string;
@@ -86,8 +89,10 @@ export interface ExecutionConfirmation {
 }
 
 export interface BrowserProfile {
+  /** Local primary key / partition id — not a business name. */
   browserId: string;
-  name: string;
+  /** @deprecated Display uses accountBinding.accountName. Kept for local file compat. */
+  name?: string;
   platform: string;
   partition: string;
   status: "stopped" | "running" | "error";
@@ -134,7 +139,6 @@ export type ClientCommand =
   | { type: "setDisplayName"; displayName: string }
   | { type: "triggerHeartbeat" }
   | { type: "getBrowserState" }
-  | { type: "createBrowserProfile"; name: string; platform?: string; account?: AccountInfo }
   | { type: "createBrowserForAccount"; account: AccountInfo }
   | { type: "deleteBrowserProfile"; browserId: string }
   | { type: "openBrowser"; browserId: string; initialUrl?: string }

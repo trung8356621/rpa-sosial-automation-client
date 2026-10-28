@@ -43,7 +43,7 @@ test("HttpError formatting: clear user-facing messages without leaking tokens", 
 test("422 validation diagnostics expose safe contract errors without credentials", async () => {
   const secret = "rpa_client_secret_that_must_never_be_logged";
   const response = new Response(JSON.stringify({
-    errors: ["device_id_required", `Bearer ${secret}`],
+    errors: ["account_id_required", `Bearer ${secret}`],
   }), {
     status: 422,
     headers: { "content-type": "application/json" },
@@ -53,7 +53,7 @@ test("422 validation diagnostics expose safe contract errors without credentials
     () => readSeoOpsJson(response, "POST", "https://seo-ops.test/api/v1/social-automation/client/register"),
     (error: unknown) => {
       assert.ok(error instanceof SeoOpsHttpError);
-      assert.match(error.message, /device_id_required/);
+      assert.match(error.message, /account_id_required/);
       assert.ok(!error.message.includes(secret));
       return true;
     },

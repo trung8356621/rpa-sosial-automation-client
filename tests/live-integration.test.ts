@@ -56,7 +56,8 @@ test("Live SEO-OPS E2E: Connect -> Register -> Heartbeat", async (t) => {
     assert.strictEqual(connectedState.status, "connected");
     assert.strictEqual(connectedState.online, true);
     assert.ok(connectedState.agentUuid, "Must receive agentUuid from SEO-OPS");
-    assert.strictEqual(connectedState.device?.deviceId, devInfo.deviceId);
+    assert.ok(connectedState.hasConnectionToken, "Must receive connection lease token");
+    assert.strictEqual(connectedState.device?.displayName, devInfo.displayName);
     assert.strictEqual(connectedState.installation?.installationId, "ins_Np0k703LfZX1EHjM");
 
     // 3. Heartbeat -> must succeed

@@ -36,7 +36,10 @@ export function formatClientHttpError(error: unknown): string {
       return "API Key không hợp lệ hoặc đã hết hạn (401 Unauthorized).";
     }
     if (d.status === 403) return "Quyền truy cập bị từ chối hoặc sai Installation (403 Forbidden).";
-    if (d.status === 404) return "Endpoint không tồn tại (404 Not Found). Kiểm tra lại URL.";
+    if (d.status === 404) return "Endpoint không tồn tại hoặc Client chưa đăng ký (404).";
+    if (d.status === 409 || d.serverErrorCode === "CLIENT_KEY_IN_USE") {
+      return "Client API Key đang được dùng bởi máy khác (CLIENT_KEY_IN_USE). Đợi kết nối cũ hết hạn hoặc ngắt máy kia.";
+    }
     if (d.status === 429) return `Quá nhiều yêu cầu. Vui lòng thử lại sau ${d.retryAfterSeconds ?? 30}s.`;
     if (d.status >= 500) return `Máy chủ SEO-OPS gặp lỗi (${d.status}). Vui lòng kiểm tra backend.`;
     if (d.category === "network_error") return "Không thể kết nối đến máy chủ. Kiểm tra mạng hoặc endpoint.";

@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import type { DeviceInfo } from "../../shared/contracts.js";
@@ -50,23 +49,34 @@ function collectOsMetadata() {
   });
 }
 
+/**
+ * Host metadata only (display name + OS).
+ * Client identity is the Client API Key — no Device UUID is generated or sent.
+ */
 export class DeviceManager {
   private filePath: string;
-  private deviceId: string | null = null;
   private displayName: string;
 
   constructor(userDataPath: string) {
-    this.filePath = path.join(userDataPath, "device.json");
+    this.filePath = path.join(userDataPath, "host-meta.json");
     this.displayName = os.hostname() || "Windows Desktop Client";
   }
 
   async initialize(): Promise<DeviceInfo> {
+    // Migrate legacy device.json displayName if present; ignore legacy deviceId.
+    try {
+      const legacyPath = path.join(path.dirname(this.filePath), "device.json");
+      const legacy = JSON.parse(await readFile(legacyPath, "utf8"));
+      if (typeof legacy.displayName === "string" && legacy.displayName.trim()) {
+        this.displayName = legacy.displayName.trim();
+      }
+    } catch {
+      // no legacy file
+    }
+
     try {
       const content = await readFile(this.filePath, "utf8");
       const parsed = JSON.parse(content);
-      if (typeof parsed.deviceId === "string" && parsed.deviceId.length >= 10) {
-        this.deviceId = parsed.deviceId;
-      }
       if (typeof parsed.displayName === "string" && parsed.displayName.trim()) {
         this.displayName = parsed.displayName.trim();
       }
@@ -74,28 +84,13 @@ export class DeviceManager {
       // Not initialized yet
     }
 
-    if (!this.deviceId) {
-      this.deviceId = `dev_${randomUUID()}`;
-      await this.persist();
-    }
-
+    await this.persist();
     return this.getDeviceInfo();
   }
 
-  getDeviceId(): string {
-    if (!this.deviceId) {
-      throw new Error("DeviceManager must be initialized before getDeviceId");
-    }
-    return this.deviceId;
-  }
-
   getDeviceInfo(): DeviceInfo {
-    if (!this.deviceId) {
-      throw new Error("DeviceManager must be initialized before getDeviceInfo");
-    }
     const osMeta = collectOsMetadata();
     return {
-      deviceId: this.deviceId,
       displayName: this.displayName,
       platform: osMeta.platform,
       osVersion: osMeta.osVersion,
@@ -119,14 +114,7 @@ export class DeviceManager {
       await mkdir(path.dirname(this.filePath), { recursive: true });
       await writeFile(
         this.filePath,
-        JSON.stringify(
-          {
-            deviceId: this.deviceId,
-            displayName: this.displayName,
-          },
-          null,
-          2
-        ),
+        JSON.stringify({ displayName: this.displayName }, null, 2),
         "utf8"
       );
     } catch {

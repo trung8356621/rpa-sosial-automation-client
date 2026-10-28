@@ -120,7 +120,8 @@ export class EmbeddedBrowser {
 
     logClientEvent("Starting embedded browser view", {
       browserId,
-      name: profile.name,
+      accountId: profile.accountBinding?.accountId,
+      accountName: profile.accountBinding?.accountName,
       partition: profile.partition,
     });
 

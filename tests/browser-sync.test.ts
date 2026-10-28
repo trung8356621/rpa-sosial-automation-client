@@ -95,7 +95,7 @@ test("BrowserSync: formats target metadata schema and strictly omits forbidden f
 
   // Target schema verification for profile 1
   assert.equal(sanitized[0].browser_id, "b3f36077-9ca6-4d26-a94f-a7f45b331001");
-  assert.equal(sanitized[0].name, "Facebook Profile 1");
+  assert.equal(sanitized[0].account_name, "test 1");
   assert.equal(sanitized[0].platform, "facebook");
   assert.equal(sanitized[0].status, "running");
   assert.deepEqual(sanitized[0].runtime, { status: "running" });
