@@ -106,7 +106,12 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
 
         if (existingProfile) {
           setShowAccountModal(false);
-          onNotify?.(`Account đã có Browser Profile "${existingProfile.name}". Đang mở profile hiện có...`);
+          const existingLabel =
+            existingProfile.accountBinding?.accountName ||
+            existingProfile.accountBinding?.email ||
+            acc.displayName ||
+            "Account";
+          onNotify?.(`Account đã có Browser Profile cho "${existingLabel}". Đang mở profile hiện có...`);
           await window.client.invoke({
             type: "openBrowser",
             browserId: existingProfile.browserId,
@@ -122,7 +127,11 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
         });
 
         setShowAccountModal(false);
-        onNotify?.(`Đã tạo Browser Profile "${result.profile.name}". Đang tự mở website...`);
+        const createdLabel =
+          result.profile.accountBinding?.accountName ||
+          acc.displayName ||
+          "Account";
+        onNotify?.(`Đã tạo Browser Profile cho "${createdLabel}". Đang tự mở website...`);
 
         // Auto open browser for newly created profile
         await window.client.invoke({
@@ -144,8 +153,12 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
       alert("Không thể xóa profile đang chạy. Hãy dừng trình duyệt trước.");
       return;
     }
+    const deleteLabel =
+      profile.accountBinding?.accountName ||
+      profile.accountBinding?.email ||
+      "Chưa liên kết Account";
     const ok = window.confirm(
-      `Bạn có chắc chắn muốn xóa profile "${profile.name}"?\n(Dữ liệu Account trên SEO-OPS không bị ảnh hưởng, chỉ xóa profile local của máy này)`
+      `Bạn có chắc chắn muốn xóa Browser của "${deleteLabel}"?\n(Dữ liệu Account trên SEO-OPS không bị ảnh hưởng, chỉ xóa profile local của máy này)`
     );
     if (!ok) return;
 
@@ -258,7 +271,7 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
               const boundAccount = p.accountBinding?.accountId;
               const boundName = p.accountBinding?.accountName;
               const boundEmail = p.accountBinding?.email;
-              const signalStatus = p.sessionSignal?.status || "unknown";
+              const signalOn = p.sessionSignal?.status === "present";
               const isCheckingSignal = checkingSignalId === p.browserId;
               const detectedTag = detectBrowserTagFromUrl(p.lastUrl || "");
 
@@ -269,8 +282,8 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
                 >
                   <div className="profile-header">
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div className="profile-title" title={boundName || boundAccount || "Legacy Browser"}>
-                        {boundName || boundEmail || "Legacy Browser cần xử lý"}
+                      <div className="profile-title" title={boundName || boundEmail || "Chưa liên kết Account"}>
+                        {boundName || boundEmail || "Chưa liên kết Account"}
                       </div>
                       <div className="profile-sub">
                         {p.platform}
@@ -294,7 +307,7 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
                   <div className="profile-meta-row">
                     <span className="meta-label">Tín hiệu Session:</span>
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      {signalStatus === "present" ? (
+                      {signalOn ? (
                         <span
                           className="signal-pill present"
                           title={
@@ -303,25 +316,19 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
                               : "Phát hiện cookie đăng nhập WordPress"
                           }
                         >
-                          ● Có tín hiệu phiên
+                          ● Signal On
                         </span>
-                      ) : signalStatus === "absent" ? (
-                        <span className="signal-pill absent" title="Không phát hiện tín hiệu đăng nhập phù hợp">
-                          ○ Không phát hiện tín hiệu
-                        </span>
-                      ) : signalStatus === "unsupported" ? (
-                        <span className="signal-pill unknown">Không hỗ trợ website này</span>
-                      ) : signalStatus === "error" ? (
-                        <span className="signal-pill absent" title={p.sessionSignal?.error || undefined}>Lỗi kiểm tra</span>
                       ) : (
-                        <span className="signal-pill unknown">Chưa kiểm tra</span>
+                        <span className="signal-pill absent" title={p.sessionSignal?.error || "Session Signal Off"}>
+                          ○ Signal Off
+                        </span>
                       )}
                       <button
                         type="button"
                         className="link-action-btn"
                         onClick={() => void handleCheckSignal(p)}
                         disabled={actionLoading || isCheckingSignal}
-                        title="Chỉ đồng bộ tín hiệu cookie (evidence). Không xác nhận đăng nhập và không xóa Needs Login."
+                        title="Kiểm tra lại cookie và đồng bộ Session Signal (boolean) lên SEO-OPS."
                       >
                         {isCheckingSignal ? "⌛" : "🔄"}
                       </button>
@@ -364,7 +371,7 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
                         style={{ padding: "4px 10px", fontSize: 11 }}
                         onClick={() => void handleOpen(p)}
                         disabled={actionLoading || !boundAccount}
-                        title={!boundAccount ? "Legacy Browser chưa liên kết Account không thể mở" : "Mở Browser"}
+                        title={!boundAccount ? "Chưa liên kết Account — không thể mở" : "Mở Browser"}
                       >
                         ▶ Mở Browser
                       </button>
@@ -401,7 +408,7 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
             <div className="modal-header">
               <div className="modal-title">
                 {modalTargetProfile
-                  ? `Liên kết Account cho: ${modalTargetProfile.name}`
+                  ? `Liên kết Account cho: ${modalTargetProfile.accountBinding?.accountName || modalTargetProfile.accountBinding?.email || "Chưa liên kết Account"}`
                   : "Chọn Account từ SEO-OPS để tạo Browser"}
               </div>
               <button

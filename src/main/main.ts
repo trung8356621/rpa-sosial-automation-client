@@ -9,10 +9,15 @@ import { DeviceManager } from "./device/device-manager.js";
 import { ClientConnection } from "./connection/client-connection.js";
 import { TrayManager } from "./app/tray-manager.js";
 import { NotificationOrchestrator } from "./app/notification-orchestrator.js";
+import {
+  getWindowsNotificationStatus,
+  openWindowsNotificationSettings,
+} from "./app/windows-notification-permission.js";
 import { ProfileManager } from "./browser/profile-manager.js";
 import { BrowserSyncService } from "./browser/browser-sync-service.js";
 import { EmbeddedBrowser } from "./browser/embedded-browser.js";
 import type { ClientCommand, BrowserStateSnapshot, ClientNotification } from "../shared/contracts.js";
+import { APP_USER_MODEL_ID } from "../shared/windows-notification.js";
 import { ClipboardService } from "./clipboard/clipboard-service.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -24,7 +29,6 @@ const isCaptureM4 = process.argv.includes("--capture-m4");
 const autoConnectKey = process.argv.find((a) => a.startsWith("--connect-key="))?.split("=")[1];
 
 /** Stable AUMID so Windows Toast can associate with this app (packaged + unpackaged Electron). */
-const APP_USER_MODEL_ID = "com.rpa.client.v2";
 if (process.platform === "win32") {
   app.setAppUserModelId(APP_USER_MODEL_ID);
 }
@@ -47,6 +51,32 @@ initializeMainLogging(userDataPath);
 let mainWindow: BrowserWindow | null = null;
 let isQuitting = false;
 let trayManager: TrayManager | null = null;
+let pendingNotificationStatusRefresh: (() => void) | null = null;
+
+function broadcastWindowsNotificationStatus(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  void getWindowsNotificationStatus().then((status) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("client:windows-notification-status", status);
+    }
+  });
+}
+
+function armNotificationStatusRefreshOnFocus(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (pendingNotificationStatusRefresh) {
+    mainWindow.removeListener("focus", pendingNotificationStatusRefresh);
+  }
+  const onFocus = () => {
+    if (pendingNotificationStatusRefresh === onFocus) {
+      pendingNotificationStatusRefresh = null;
+    }
+    mainWindow?.removeListener("focus", onFocus);
+    broadcastWindowsNotificationStatus();
+  };
+  pendingNotificationStatusRefresh = onFocus;
+  mainWindow.on("focus", onFocus);
+}
 
 const store = new ClientStore(userDataPath);
 const credentials = new ClientCredentialStore(userDataPath);
@@ -305,48 +335,18 @@ async function bootstrap() {
         return [];
       }
       case "ackNotification": {
-        const acked = await syncService!.acknowledgeNotification(cmd.notificationId);
-        if (acked) {
-          void notificationOrchestrator?.poll("after-ack");
+        // Seen-only: hide immediately; ACK retries in orchestrator. No session/login side effects.
+        if (notificationOrchestrator) {
+          return notificationOrchestrator.markSeen(cmd.notificationId);
         }
-        return acked;
+        return [];
       }
-      case "confirmNotificationLogin": {
-        const profile = profileManager.get(cmd.browserId);
-        if (!profile || profile.accountBinding?.accountId !== cmd.accountId) {
-          throw new Error("Notification không khớp Browser/Account trên thiết bị này.");
-        }
-        const signal = await embeddedBrowser!.checkSessionSignal(cmd.browserId);
-        if (signal.status !== "present") {
-          return { ok: false, error: "Không phát hiện tín hiệu đăng nhập mới. Session vẫn Needs Login." };
-        }
-        const synced = await syncService!.syncAll();
-        if (!synced) {
-          return {
-            ok: false,
-            error: "Không đồng bộ được tín hiệu mới lên SEO-OPS. Thử lại khi Client online.",
-          };
-        }
-        const confirmed = await syncService!.confirmLogin(cmd.browserId, cmd.accountId, signal.checkedAt);
-        if (!confirmed.ok) {
-          return { ok: false, error: confirmed.error };
-        }
-        let ackPending = false;
-        try {
-          const acked = await syncService!.acknowledgeNotification(cmd.notificationId);
-          ackPending = !acked;
-        } catch (err) {
-          logClientError("ACK after login confirm failed; confirmation kept", err);
-          ackPending = true;
-        }
-        broadcastBrowserState();
-        void notificationOrchestrator?.poll("after-confirm");
-        return {
-          ok: true,
-          ack_pending: ackPending,
-          session_state: confirmed.session_state,
-          dispatch_enabled: confirmed.dispatch_enabled,
-        };
+      case "getWindowsNotificationStatus":
+        return await getWindowsNotificationStatus();
+      case "openWindowsNotificationSettings": {
+        await openWindowsNotificationSettings();
+        armNotificationStatusRefreshOnFocus();
+        return true;
       }
       case "copyAccountEmail": {
         await clipboardService.copy(async () => {

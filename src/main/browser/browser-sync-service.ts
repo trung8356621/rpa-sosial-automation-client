@@ -1,9 +1,15 @@
-import type { BrowserProfile, AccountInfo } from "../../shared/contracts.js";
+import type { BrowserProfile, AccountInfo, SessionSignal } from "../../shared/contracts.js";
 import type { AccountDetail } from "../../shared/contracts.js";
 import type { ClientConnection } from "../connection/client-connection.js";
 import type { ProfileManager } from "./profile-manager.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
 import { formatClientHttpError, SeoOpsHttpError } from "../../shared/seo-ops-http.js";
+import {
+  normalizeSessionSignal,
+  shouldApplyRemoteSignal,
+  signalIsPresent,
+  type RemoteSessionSignal,
+} from "../../shared/session-signal-sync.js";
 
 export interface TargetBrowserPayload {
   browser_id: string;
@@ -19,6 +25,7 @@ export interface TargetBrowserPayload {
     account_name?: string;
   };
   session_signal: {
+    present: boolean;
     status: "present" | "absent" | "unsupported" | "error" | "unknown";
     checked_at: string | null;
     method: "facebook_c_user_cookie" | "wordpress_auth_cookie" | "site_cookie_presence" | null;
@@ -54,11 +61,12 @@ export function sanitizeProfilesForSync(profiles: BrowserProfile[]): TargetBrows
       : { account_id: null, bound_at: null },
     session_signal: p.sessionSignal
       ? {
-          status: p.sessionSignal.status,
+          present: signalIsPresent(p.sessionSignal),
+          status: signalIsPresent(p.sessionSignal) ? "present" : "absent",
           checked_at: p.sessionSignal.checkedAt,
           method: p.sessionSignal.method,
         }
-      : { status: "unknown", checked_at: null, method: null },
+      : { present: false, status: "absent", checked_at: null, method: null },
     execution_confirmation: p.executionConfirmation
       ? {
           status: p.executionConfirmation.status,
@@ -111,6 +119,43 @@ export class BrowserSyncService {
       }
       this.wasOnline = online;
     });
+    this.connection.onHeartbeatResponse?.((payload) => {
+      void this.applyRemoteSessionSignals(payload.session_signals);
+    });
+  }
+
+  /**
+   * Apply SEO-OPS → Client Session Signal updates (last-writer-wins by checked_at).
+   * Does not touch session_state / login confirm / ACK.
+   */
+  async applyRemoteSessionSignals(raw: unknown): Promise<number> {
+    if (!Array.isArray(raw)) return 0;
+    let applied = 0;
+    for (const row of raw as RemoteSessionSignal[]) {
+      const browserId = typeof row?.browser_id === "string" ? row.browser_id : "";
+      if (!browserId) continue;
+      const profile = this.profileManager.get(browserId);
+      if (!profile) continue;
+      const remote = normalizeSessionSignal({
+        present: row.present,
+        status: row.status,
+        checked_at: row.checked_at,
+        method: row.method,
+      });
+      if (!shouldApplyRemoteSignal(profile.sessionSignal, remote)) continue;
+      const next: SessionSignal = {
+        ...remote,
+        // Preserve detection method metadata when admin only flips the boolean.
+        method: remote.method ?? profile.sessionSignal?.method ?? null,
+      };
+      await this.profileManager.updateSessionSignal(browserId, next);
+      applied += 1;
+    }
+    if (applied > 0) {
+      logClientEvent("Applied remote Session Signal updates", { applied });
+      this.onProfilesRefreshed?.();
+    }
+    return applied;
   }
 
   async getAccounts(platform?: string): Promise<AccountInfo[]> {
@@ -289,6 +334,7 @@ export class BrowserSyncService {
         logClientEvent("Synced browser sessions to SEO-OPS successfully", {
           syncedCount: (response.browsers as unknown[])?.length ?? browsers.length,
         });
+        await this.applyRemoteSessionSignals(response.session_signals);
         return true;
       }
 

@@ -270,7 +270,7 @@ export function BrowserWorkspacePanel({
         <div className="browser-workspace-subbar">
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <span>
-              Account: <strong>{activeProfile.accountBinding?.accountName || activeAccount?.displayName || "Legacy Browser"}</strong>
+              Account: <strong>{activeProfile.accountBinding?.accountName || activeAccount?.displayName || "Chưa liên kết Account"}</strong>
             </span>
 
             {/* Current Website auto-detected from URL */}
@@ -328,22 +328,16 @@ export function BrowserWorkspacePanel({
 
           <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
             {activeProfile.sessionSignal?.status === "present" ? (
-              <span className="signal-pill present">● Có tín hiệu phiên</span>
-            ) : activeProfile.sessionSignal?.status === "absent" ? (
-              <span className="signal-pill absent">○ Không phát hiện tín hiệu đăng nhập</span>
-            ) : activeProfile.sessionSignal?.status === "unsupported" ? (
-              <span className="signal-pill unknown">Không hỗ trợ kiểm tra website này</span>
-            ) : activeProfile.sessionSignal?.status === "error" ? (
-              <span className="signal-pill absent" title={activeProfile.sessionSignal.error || undefined}>Lỗi kiểm tra session</span>
+              <span className="signal-pill present">● Signal On</span>
             ) : (
-              <span className="signal-pill unknown">Tín hiệu: Chưa kiểm tra</span>
+              <span className="signal-pill absent" title={activeProfile.sessionSignal?.error || undefined}>○ Signal Off</span>
             )}
             <button
               type="button"
               className="link-action-btn"
               onClick={handleCheckSignal}
               disabled={checkingSignal || !activeBrowserId}
-              title="Chỉ đồng bộ tín hiệu cookie (evidence). Không xác nhận đăng nhập và không xóa Needs Login."
+              title="Kiểm tra lại cookie và đồng bộ Session Signal (boolean) lên SEO-OPS."
             >
               {checkingSignal ? "⌛" : "🔄"}
             </button>

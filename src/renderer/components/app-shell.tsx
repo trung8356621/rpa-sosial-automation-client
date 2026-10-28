@@ -1,5 +1,10 @@
 import React, { useEffect, useState } from "react";
-import type { ClientNotification, ConnectionState } from "../../shared/contracts.js";
+import type {
+  ClientNotification,
+  ConnectionState,
+  WindowsNotificationStatus,
+} from "../../shared/contracts.js";
+import { APP_USER_MODEL_ID } from "../../shared/windows-notification.js";
 import { DeviceStatusPanel } from "./device-status-panel.js";
 import { ConnectionSettingsPanel } from "./connection-settings-panel.js";
 import { BrowserProfilesPanel } from "./browser-profiles-panel.js";
@@ -19,6 +24,8 @@ export function AppShell() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [toast, setToast] = useState<string | null>(null);
   const [notifications, setNotifications] = useState<ClientNotification[]>([]);
+  const [windowsNotifStatus, setWindowsNotifStatus] = useState<WindowsNotificationStatus | null>(null);
+  const [windowsNotifBannerDismissed, setWindowsNotifBannerDismissed] = useState(false);
 
   const refreshState = async () => {
     try {
@@ -26,6 +33,26 @@ export function AppShell() {
       setState(next);
     } catch {
       // ignore
+    }
+  };
+
+  const refreshWindowsNotifStatus = async () => {
+    try {
+      const next = await window.client.invoke<WindowsNotificationStatus>({
+        type: "getWindowsNotificationStatus",
+      });
+      setWindowsNotifStatus(next);
+      if (next.status === "Allowed") {
+        setWindowsNotifBannerDismissed(false);
+      }
+    } catch {
+      setWindowsNotifStatus({
+        status: "Blocked",
+        setting: "Unverified",
+        verified: false,
+        reason: "Không xác minh được quyền",
+        appUserModelId: APP_USER_MODEL_ID,
+      });
     }
   };
 
@@ -38,6 +65,7 @@ export function AppShell() {
 
   useEffect(() => {
     void refreshState();
+    void refreshWindowsNotifStatus();
     const refreshTimer = setInterval(() => void refreshState(), 5_000);
 
     const unsubState = window.client.onStateChange((next) => {
@@ -46,6 +74,13 @@ export function AppShell() {
 
     const unsubNotifications = window.client.onNotifications((rows) => {
       setNotifications(rows);
+    });
+
+    const unsubWindowsNotif = window.client.onWindowsNotificationStatus((next) => {
+      setWindowsNotifStatus(next);
+      if (next.status === "Allowed") {
+        setWindowsNotifBannerDismissed(false);
+      }
     });
 
     const unsubLog = window.client.onLog((entry) => {
@@ -61,50 +96,17 @@ export function AppShell() {
       clearInterval(refreshTimer);
       unsubState();
       unsubNotifications();
+      unsubWindowsNotif();
       unsubLog();
     };
   }, []);
 
-  const acknowledgeNotification = async (id: string) => {
-    const acked = await window.client.invoke<boolean>({ type: "ackNotification", notificationId: id });
-    if (acked) {
-      setNotifications((rows) => rows.filter((row) => row.id !== id));
-      showNotification("Đã xác nhận xử lý; trạng thái Session không tự thay đổi");
-    } else {
-      showNotification("Không thể gửi xác nhận. Thông báo vẫn được giữ lại.");
-    }
-  };
-
-  const confirmLoginNotification = async (item: ClientNotification) => {
-    if (!item.browser_id || !item.account_id) {
-      showNotification("Thông báo không có Browser/Account hợp lệ.");
-      return;
-    }
-    try {
-      const result = await window.client.invoke<{
-        ok: boolean;
-        error?: string;
-        session_state?: string;
-        ack_pending?: boolean;
-      }>({
-        type: "confirmNotificationLogin",
-        notificationId: item.id,
-        browserId: item.browser_id,
-        accountId: item.account_id,
-      });
-      if (!result.ok) {
-        showNotification(result.error || "Chưa xác nhận được tín hiệu đăng nhập.");
-        return;
-      }
-      if (result.ack_pending) {
-        showNotification("Session đã về Candidate. Thông báo còn chờ ACK — sẽ giữ lại để thử lại.");
-      } else {
-        setNotifications((rows) => rows.filter((row) => row.id !== item.id));
-        showNotification("Đã xác nhận đăng nhập. Session chuyển về Candidate.");
-      }
-    } catch (error) {
-      showNotification(error instanceof Error ? error.message : "Không thể xác nhận đăng nhập.");
-    }
+  const markNotificationSeen = (id: string) => {
+    // Hide immediately; main queues ACK independently (retry on reconnect).
+    setNotifications((rows) => rows.filter((row) => row.id !== id));
+    void window.client.invoke({ type: "ackNotification", notificationId: id }).catch(() => {
+      // Keep hidden; orchestrator retains local dismiss + ACK retry.
+    });
   };
 
   const openNotificationBrowser = async (item: ClientNotification) => {
@@ -130,6 +132,16 @@ export function AppShell() {
 
   const isOnline = state.status === "connected" && state.online;
   const isConnecting = state.status === "connecting";
+  const showWindowsNotifBanner =
+    windowsNotifStatus?.status === "Blocked" && !windowsNotifBannerDismissed;
+
+  const openWindowsNotifSettings = async () => {
+    try {
+      await window.client.invoke({ type: "openWindowsNotificationSettings" });
+    } catch (error) {
+      showNotification(error instanceof Error ? error.message : "Không mở được Windows Settings.");
+    }
+  };
 
   return (
     <>
@@ -201,6 +213,32 @@ export function AppShell() {
         </aside>
 
         <main className={`main-content ${activeTab === "browser" ? "browser-active" : ""}`}>
+          {showWindowsNotifBanner && (
+            <div className="windows-notif-startup-banner" role="status">
+              <div className="windows-notif-startup-copy">
+                Windows Notifications chưa được bật.
+                Hãy cho phép thông báo để không bỏ lỡ yêu cầu
+                từ SEO-OPS khi ứng dụng chạy nền.
+              </div>
+              <div className="windows-notif-startup-actions">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => void openWindowsNotifSettings()}
+                >
+                  Open Windows Settings
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setWindowsNotifBannerDismissed(true)}
+                  aria-label="Đóng"
+                >
+                  Đóng
+                </button>
+              </div>
+            </div>
+          )}
           {notifications.length > 0 && (
             <section className="notification-center" aria-label="Notification center">
               <div className="notification-center-title">Yêu cầu cần xử lý ({notifications.length})</div>
@@ -211,19 +249,10 @@ export function AppShell() {
                     <span>{item.message}</span>
                   </div>
                   <div className="notification-actions">
-                    <button type="button" className="btn btn-secondary" disabled={!item.browser_id} onClick={() => void openNotificationBrowser(item)}>Mở Browser</button>
-                    {item.type === "login_required" ? (
-                      <button
-                        type="button"
-                        className="btn btn-confirm-login"
-                        title="Xác nhận đăng nhập sau khi có tín hiệu cookie mới — khác với nút 🔄 chỉ đồng bộ tín hiệu"
-                        onClick={() => void confirmLoginNotification(item)}
-                      >
-                        Xác nhận đã đăng nhập
-                      </button>
-                    ) : (
-                      <button type="button" className="btn btn-primary" onClick={() => void acknowledgeNotification(item.id)}>Đã xử lý</button>
-                    )}
+                    {item.browser_id ? (
+                      <button type="button" className="btn btn-secondary" onClick={() => void openNotificationBrowser(item)}>Mở Browser</button>
+                    ) : null}
+                    <button type="button" className="btn btn-primary" onClick={() => markNotificationSeen(item.id)}>Đã xem</button>
                   </div>
                 </article>
               ))}

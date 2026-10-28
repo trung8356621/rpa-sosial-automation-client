@@ -153,6 +153,6 @@ test("ACK failure path is independent of confirmLogin success shape", async () =
     ackFailed = true;
   }
   assert.equal(ackFailed, true);
-  // Confirmation result remains successful even though ACK threw — main.ts must keep ok:true + ack_pending.
+  // Session confirmLogin is independent of notification ACK transport failures.
   assert.equal(confirmed.ok, true);
 });

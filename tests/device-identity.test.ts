@@ -14,6 +14,8 @@ test("DeviceManager: generates and persists durable UUID device_id", async () =>
     assert.ok(info1.deviceId.startsWith("dev_"), "deviceId must have dev_ prefix");
     assert.ok(info1.deviceId.length > 20, "deviceId must be UUID format");
     assert.strictEqual(info1.clientVersion, "0.1.0");
+    assert.ok(["windows", "linux", "macos", "other"].includes(info1.osFamily));
+    assert.ok(typeof info1.osLabel === "string" && info1.osLabel.length > 0);
 
     // Second initialization with same userData path must yield identical deviceId
     const manager2 = new DeviceManager(tmpDir);

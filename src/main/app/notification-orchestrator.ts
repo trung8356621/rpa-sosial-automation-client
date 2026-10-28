@@ -45,10 +45,16 @@ function toastBody(items: ClientNotification[]): string {
 }
 
 export class NotificationOrchestrator {
-  private readonly seenIds = new Set<string>();
+  /** UUIDs already shown via Windows toast (dedupe only). */
+  private readonly toastedIds = new Set<string>();
+  /** UUIDs the user marked Seen locally — never re-surface even if server lag. */
+  private readonly dismissedIds = new Set<string>();
+  /** ACK still owed to SEO-OPS after local dismiss. */
+  private readonly pendingAckIds = new Set<string>();
   private readonly pending = new Map<string, ClientNotification>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
+  private flushingAcks = false;
   private wasOnline = false;
 
   constructor(
@@ -61,6 +67,7 @@ export class NotificationOrchestrator {
       const online = state.status === "connected" && state.online;
       if (online && !this.wasOnline) {
         void this.poll("connect");
+        void this.flushPendingAcks();
         this.startPeriodic();
       } else if (!online) {
         this.stopPeriodic();
@@ -87,6 +94,45 @@ export class NotificationOrchestrator {
     return [...this.pending.values()];
   }
 
+  /**
+   * Mark Seen: hide immediately, ACK in background (retry on reconnect).
+   * Does not touch session signal / login confirmation / account state.
+   */
+  markSeen(notificationId: string): ClientNotification[] {
+    this.dismissedIds.add(notificationId);
+    this.pendingAckIds.add(notificationId);
+    this.pending.delete(notificationId);
+    const snapshot = this.getPending();
+    this.broadcast(snapshot);
+    void this.flushPendingAcks();
+    return snapshot;
+  }
+
+  async flushPendingAcks(): Promise<void> {
+    if (this.flushingAcks || !this.connection.isOnline() || this.pendingAckIds.size === 0) {
+      return;
+    }
+    this.flushingAcks = true;
+    try {
+      for (const id of [...this.pendingAckIds]) {
+        try {
+          const ok = await this.syncService.acknowledgeNotification(id);
+          this.pendingAckIds.delete(id);
+          if (ok) {
+            logClientEvent("Notification ACK sent", { notificationId: id });
+          } else {
+            logClientEvent("Notification ACK dropped (not found)", { notificationId: id });
+          }
+        } catch (err) {
+          logClientError("Notification ACK failed; will retry after reconnect", err);
+          // keep id in pendingAckIds
+        }
+      }
+    } finally {
+      this.flushingAcks = false;
+    }
+  }
+
   async poll(reason: string): Promise<ClientNotification[]> {
     if (!this.connection.isOnline()) {
       return this.getPending();
@@ -108,10 +154,21 @@ export class NotificationOrchestrator {
 
       const newcomers: ClientNotification[] = [];
       for (const item of mapped) {
+        if (this.dismissedIds.has(item.id)) {
+          // Still pending on server — keep hidden and ensure ACK is queued.
+          this.pendingAckIds.add(item.id);
+          continue;
+        }
         this.pending.set(item.id, item);
-        if (!this.seenIds.has(item.id)) {
-          this.seenIds.add(item.id);
+        if (!this.toastedIds.has(item.id)) {
+          this.toastedIds.add(item.id);
           newcomers.push(item);
+        }
+      }
+
+      for (const id of [...this.dismissedIds]) {
+        if (!nextIds.has(id) && !this.pendingAckIds.has(id)) {
+          this.dismissedIds.delete(id);
         }
       }
 
@@ -128,6 +185,7 @@ export class NotificationOrchestrator {
         this.alertUser(newcomers);
       }
 
+      void this.flushPendingAcks();
       return snapshot;
     } catch (err) {
       logClientError("Failed to poll client notifications", err);

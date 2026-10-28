@@ -1,5 +1,6 @@
-import React, { useState } from "react";
-import type { ConnectionState } from "../../shared/contracts.js";
+import React, { useCallback, useEffect, useState } from "react";
+import type { ConnectionState, WindowsNotificationStatus } from "../../shared/contracts.js";
+import { APP_USER_MODEL_ID } from "../../shared/windows-notification.js";
 
 interface Props {
   state: ConnectionState;
@@ -13,8 +14,49 @@ export function ConnectionSettingsPanel({ state, onUpdate }: Props) {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
+  const [notifStatus, setNotifStatus] = useState<WindowsNotificationStatus | null>(null);
+  const [notifBusy, setNotifBusy] = useState(false);
 
   const isConnected = state.status === "connected";
+
+  const refreshNotificationStatus = useCallback(async () => {
+    setNotifBusy(true);
+    try {
+      const next = await window.client.invoke<WindowsNotificationStatus>({
+        type: "getWindowsNotificationStatus",
+      });
+      setNotifStatus(next);
+    } catch {
+      setNotifStatus({
+        status: "Blocked",
+        setting: "Unverified",
+        verified: false,
+        reason: "Không xác minh được quyền",
+        appUserModelId: APP_USER_MODEL_ID,
+      });
+    } finally {
+      setNotifBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshNotificationStatus();
+    const unsub = window.client.onWindowsNotificationStatus((next) => {
+      setNotifStatus(next);
+    });
+    return unsub;
+  }, [refreshNotificationStatus]);
+
+  async function handleOpenWindowsSettings() {
+    setNotifBusy(true);
+    try {
+      await window.client.invoke({ type: "openWindowsNotificationSettings" });
+    } catch (err) {
+      setActionError((err as Error).message);
+    } finally {
+      setNotifBusy(false);
+    }
+  }
 
   async function handleSaveEndpoint() {
     setBusy(true);
@@ -157,6 +199,48 @@ export function ConnectionSettingsPanel({ state, onUpdate }: Props) {
         <div className="alert alert-error">{state.lastError}</div>
       )}
       {actionSuccess && <div className="alert alert-success">{actionSuccess}</div>}
+
+      <div className="windows-notif-section">
+        <div className="form-label">Windows Notifications</div>
+        <div className="windows-notif-row">
+          <div className="windows-notif-status-wrap">
+            <span className="windows-notif-status-label">Status:</span>
+            {notifStatus ? (
+              <span
+                className={`windows-notif-badge ${
+                  notifStatus.status === "Allowed" ? "allowed" : "blocked"
+                }`}
+              >
+                {notifStatus.status}
+              </span>
+            ) : (
+              <span className="windows-notif-badge blocked">Blocked</span>
+            )}
+            {notifStatus?.reason && (
+              <span className="windows-notif-reason">{notifStatus.reason}</span>
+            )}
+          </div>
+          <div className="windows-notif-actions">
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={notifBusy}
+              onClick={() => void handleOpenWindowsSettings()}
+            >
+              Open Windows Settings
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={notifBusy}
+              onClick={() => void refreshNotificationStatus()}
+              title="Làm mới trạng thái"
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

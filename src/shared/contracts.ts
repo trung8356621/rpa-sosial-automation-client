@@ -1,8 +1,19 @@
+import type {
+  WindowsNotificationDisplayStatus,
+  WindowsNotificationStatus,
+} from "./windows-notification.js";
+
+export type { WindowsNotificationDisplayStatus, WindowsNotificationStatus };
+
 export interface DeviceInfo {
   deviceId: string;
   displayName: string;
   platform: string;
   osVersion: string;
+  /** Normalized OS family for SEO-OPS device metadata. */
+  osFamily: "windows" | "linux" | "macos" | "other";
+  /** Human-readable OS label (e.g. Windows 11, Ubuntu 24.04). */
+  osLabel: string;
   clientVersion: string;
 }
 
@@ -143,13 +154,15 @@ export type ClientCommand =
   | { type: "checkSessionSignal"; browserId: string }
   | { type: "getNotifications" }
   | { type: "ackNotification"; notificationId: string }
-  | { type: "confirmNotificationLogin"; notificationId: string; browserId: string; accountId: string };
+  | { type: "getWindowsNotificationStatus" }
+  | { type: "openWindowsNotificationSettings" };
 
 export interface ClientApi {
   invoke: <T = unknown>(command: ClientCommand) => Promise<T>;
   onStateChange: (callback: (state: ConnectionState) => void) => () => void;
   onBrowserStateChange: (callback: (state: BrowserStateSnapshot) => void) => () => void;
   onNotifications: (callback: (notifications: ClientNotification[]) => void) => () => void;
+  onWindowsNotificationStatus: (callback: (status: WindowsNotificationStatus) => void) => () => void;
   onLog: (callback: (entry: { time: string; level: string; message: string }) => void) => () => void;
 }
 

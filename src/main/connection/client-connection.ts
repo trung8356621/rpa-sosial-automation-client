@@ -25,6 +25,7 @@ export class ClientConnection {
   private backoffMs = INITIAL_BACKOFF_MS;
   private inFlightHeartbeat = false;
   private stateListeners = new Set<(state: ConnectionState) => void>();
+  private heartbeatListeners = new Set<(payload: Record<string, unknown>) => void>();
 
   constructor(
     private readonly store: ClientStore,
@@ -36,6 +37,11 @@ export class ClientConnection {
     this.stateListeners.add(listener);
     listener(this.getState());
     return () => this.stateListeners.delete(listener);
+  }
+
+  onHeartbeatResponse(listener: (payload: Record<string, unknown>) => void): () => void {
+    this.heartbeatListeners.add(listener);
+    return () => this.heartbeatListeners.delete(listener);
   }
 
   private notify() {
@@ -173,6 +179,8 @@ export class ClientConnection {
       display_name: dev.displayName,
       platform: dev.platform,
       os_version: dev.osVersion,
+      os_family: dev.osFamily,
+      os_label: dev.osLabel,
       app_version: dev.clientVersion,
       runtime_version: `electron-${process.versions.electron}`,
     };
@@ -236,12 +244,23 @@ export class ClientConnection {
         agent_uuid: this.agentUuid,
         availability: "available",
         app_version: dev.clientVersion,
+        os_family: dev.osFamily,
+        os_label: dev.osLabel,
+        platform: dev.platform,
+        os_version: dev.osVersion,
       };
 
       const res = await this.request(endpoint, "/api/v1/social-automation/client/heartbeat", "POST", apiKey, payload);
       this.online = true;
       this.lastHeartbeatAt = new Date().toISOString();
       this.lastError = undefined;
+      for (const listener of this.heartbeatListeners) {
+        try {
+          listener(res);
+        } catch {
+          // ignore listener error
+        }
+      }
       return true;
     } catch (err) {
       const formatted = formatClientHttpError(err);

@@ -105,10 +105,12 @@ test("BrowserSync: formats target metadata schema and strictly omits forbidden f
     account_name: "test 1",
   });
   assert.deepEqual(sanitized[0].session_signal, {
+    present: true,
     status: "present",
     checked_at: "2026-10-26T12:05:00Z",
     method: "facebook_c_user_cookie",
   });
+  assert.equal(sanitized[1].session_signal.present, false);
   assert.deepEqual(sanitized[0].execution_confirmation, {
     status: "not_run",
     first_run_at: null,

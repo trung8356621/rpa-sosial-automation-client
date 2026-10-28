@@ -120,7 +120,7 @@ export function DeviceStatusPanel({ state, onUpdate }: Props) {
 
         <div className="info-item">
           <div className="info-label">Hệ điều hành / Nền tảng</div>
-          <div className="info-value">{device?.osVersion || "Windows"}</div>
+          <div className="info-value">{device?.osLabel || device?.osVersion || "—"}</div>
         </div>
 
         <div className="info-item">

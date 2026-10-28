@@ -1,10 +1,54 @@
+import { readFileSync } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import type { DeviceInfo } from "../../shared/contracts.js";
+import { detectOsMetadata } from "../../shared/os-metadata.js";
 
 const CLIENT_VERSION = "0.1.0";
+
+function readLinuxOsRelease(): string | null {
+  try {
+    return readFileSync("/etc/os-release", "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function readMacosProductVersion(): string | null {
+  try {
+    const out = execFileSync("sw_vers", ["-productVersion"], {
+      encoding: "utf8",
+      timeout: 1500,
+      windowsHide: true,
+    });
+    const trimmed = String(out || "").trim();
+    return trimmed || null;
+  } catch {
+    return null;
+  }
+}
+
+function collectOsMetadata() {
+  let version = "";
+  try {
+    version = os.version();
+  } catch {
+    version = "";
+  }
+
+  return detectOsMetadata({
+    platform: process.platform,
+    release: os.release(),
+    type: os.type(),
+    arch: os.arch(),
+    version,
+    linuxOsRelease: process.platform === "linux" ? readLinuxOsRelease() : null,
+    macosProductVersion: process.platform === "darwin" ? readMacosProductVersion() : null,
+  });
+}
 
 export class DeviceManager {
   private filePath: string;
@@ -49,11 +93,14 @@ export class DeviceManager {
     if (!this.deviceId) {
       throw new Error("DeviceManager must be initialized before getDeviceInfo");
     }
+    const osMeta = collectOsMetadata();
     return {
       deviceId: this.deviceId,
       displayName: this.displayName,
-      platform: process.platform === "win32" ? "windows" : process.platform,
-      osVersion: `${os.type()} ${os.release()} (${os.arch()})`,
+      platform: osMeta.platform,
+      osVersion: osMeta.osVersion,
+      osFamily: osMeta.osFamily,
+      osLabel: osMeta.osLabel,
       clientVersion: CLIENT_VERSION,
     };
   }

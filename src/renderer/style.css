@@ -602,26 +602,6 @@ body {
   gap: 8px;
 }
 
-.btn-confirm-login {
-  border: 1px solid #15803d;
-  border-radius: 8px;
-  background: #16a34a;
-  color: #f0fdf4;
-  font-size: 12px;
-  font-weight: 700;
-  padding: 7px 12px;
-  cursor: pointer;
-}
-
-.btn-confirm-login:hover:not(:disabled) {
-  background: #15803d;
-}
-
-.btn-confirm-login:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
 @media (max-width: 720px) {
   .notification-item {
     align-items: stretch;
@@ -1014,4 +994,90 @@ body {
   border-color: #1e293b;
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+/* Windows Notifications (Connection Settings) */
+.windows-notif-section {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #1e293b;
+}
+
+.windows-notif-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.windows-notif-status-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.windows-notif-status-label {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.windows-notif-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.windows-notif-badge.allowed {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+.windows-notif-badge.blocked {
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.windows-notif-reason {
+  color: #fbbf24;
+  font-size: 11px;
+}
+
+.windows-notif-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.windows-notif-startup-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: #fde68a;
+}
+
+.windows-notif-startup-copy {
+  flex: 1 1 280px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.windows-notif-startup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
