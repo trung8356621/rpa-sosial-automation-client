@@ -90,11 +90,6 @@ export class ProfileManager {
       throw new Error("Không thể tạo Browser nếu chưa chọn Account.");
     }
 
-    const email = account.email ? account.email.trim() : "";
-    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      throw new Error("Thiếu Email — vui lòng cập nhật trên SEO-OPS");
-    }
-
     // If Account already has a Browser Profile on the same device: do not duplicate, reuse existing.
     const existing = this.findByAccountId(account.accountId);
     if (existing) {

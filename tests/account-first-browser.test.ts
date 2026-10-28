@@ -40,39 +40,36 @@ test("A. Không thể tạo Browser nếu chưa chọn Account", async () => {
   }
 });
 
-test("B. Account thiếu Email bị từ chối", async () => {
+test("B. Account không cần email — username/password đủ để tạo Browser", async () => {
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "client-test-b-"));
   try {
     const pm = new ProfileManager(tmpDir);
     await pm.initialize();
 
-    await assert.rejects(
-      async () =>
-        await pm.createForAccount({
-          accountId: "acc-no-email-1",
-          displayName: "No Email Account",
-          platform: "facebook",
-          email: null,
-          username: null,
-          identityLabel: null,
-          verified: false,
-        }),
-      /Thiếu Email/
-    );
+    const noEmail = await pm.createForAccount({
+      accountId: "acc-no-email-1",
+      displayName: "No Email Account",
+      platform: "facebook",
+      email: null,
+      username: "seed_user_01",
+      identityLabel: null,
+      verified: false,
+    });
+    assert.equal(noEmail.alreadyExists, false);
+    assert.equal(noEmail.profile.accountBinding?.accountId, "acc-no-email-1");
+    assert.equal(noEmail.profile.accountBinding?.email, null);
 
-    await assert.rejects(
-      async () =>
-        await pm.createForAccount({
-          accountId: "acc-no-email-2",
-          displayName: "Whitespace Email Account",
-          platform: "facebook",
-          email: "   ",
-          username: null,
-          identityLabel: null,
-          verified: false,
-        }),
-      /Thiếu Email/
-    );
+    const blankEmail = await pm.createForAccount({
+      accountId: "acc-no-email-2",
+      displayName: "Username Only Account",
+      platform: "wordpress",
+      email: "   ",
+      username: "mayhopphat",
+      identityLabel: null,
+      verified: false,
+    });
+    assert.equal(blankEmail.alreadyExists, false);
+    assert.equal(blankEmail.profile.accountBinding?.accountId, "acc-no-email-2");
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }

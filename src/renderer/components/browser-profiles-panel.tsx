@@ -63,11 +63,6 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
   };
 
   const handleSelectAccount = async (acc: AccountInfo) => {
-    if (!acc.email || !acc.email.trim()) {
-      alert("Account này thiếu Email. Vui lòng cập nhật email trên SEO-OPS trước khi tạo Browser.");
-      return;
-    }
-
     setActionLoading(true);
     try {
       if (modalTargetProfile) {
@@ -427,7 +422,7 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
               <p style={{ color: "#94a3b8", fontSize: 12, marginBottom: 12 }}>
                 {modalTargetProfile
                   ? "Chọn Account để gán vào Browser Profile này. Đổi sang account khác sẽ tự động xóa session/cookies cũ để đảm bảo an toàn."
-                  : "Mỗi Browser gắn liền với một Account duy nhất trên SEO-OPS. Hãy chọn một Account đã cấu hình email để tự động tạo Browser và mở website."}
+                  : "Mỗi Browser gắn liền với một Account duy nhất trên SEO-OPS. Chọn Account để tạo Browser và mở website."}
               </p>
 
               {loadingAccounts ? (
@@ -449,13 +444,13 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
                     Chưa có Account nào trên SEO-OPS
                   </div>
                   <div style={{ color: "#94a3b8", fontSize: 12, maxWidth: 380, margin: "0 auto 12px" }}>
-                    Vui lòng truy cập trang quản trị SEO-OPS để tạo Account với đầy đủ thông tin Email và Platform trước khi tạo Browser.
+                    Vui lòng tạo Account trên SEO-OPS trước khi tạo Browser.
                   </div>
                 </div>
               ) : (
                 <div className="account-list-container">
                   {availableAccounts.map((acc) => {
-                    const hasEmail = Boolean(acc.email && acc.email.trim());
+                    const loginHint = (acc.email || acc.username || "").trim();
                     const existingProfile = snapshot?.profiles.find(
                       (p) => p.accountBinding?.accountId === acc.accountId
                     );
@@ -467,10 +462,7 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
                     return (
                       <div
                         key={acc.accountId}
-                        className={`account-list-item ${isCurrentBinding ? "current" : ""} ${
-                          !hasEmail ? "disabled" : ""
-                        }`}
-                        style={{ opacity: hasEmail ? 1 : 0.6 }}
+                        className={`account-list-item ${isCurrentBinding ? "current" : ""}`}
                       >
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -482,9 +474,11 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
                             </span>
                           </div>
 
-                          <div style={{ fontSize: 11, color: hasEmail ? "#38bdf8" : "#ef4444", marginTop: 2 }}>
-                            {hasEmail ? `✉ ${acc.email}` : "⚠️ Thiếu Email — vui lòng cập nhật trên SEO-OPS"}
-                          </div>
+                          {loginHint ? (
+                            <div style={{ fontSize: 11, color: "#38bdf8", marginTop: 2 }}>
+                              👤 {loginHint}
+                            </div>
+                          ) : null}
 
                           {acc.siteUrl && (
                             <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>
@@ -503,33 +497,27 @@ export function BrowserProfilesPanel({ onNotify, onOpenBrowser }: BrowserProfile
                         </div>
 
                         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                          {hasEmail ? (
-                            <button
-                              type="button"
-                              className={`btn ${
-                                isCurrentBinding
-                                  ? "btn-secondary"
-                                  : existingProfile && !modalTargetProfile
-                                  ? "btn-secondary"
-                                  : "btn-primary"
-                              }`}
-                              style={{ padding: "4px 10px", fontSize: 11 }}
-                              disabled={actionLoading || isCurrentBinding}
-                              onClick={() => void handleSelectAccount(acc)}
-                            >
-                              {isCurrentBinding
-                                ? "Đang chọn"
+                          <button
+                            type="button"
+                            className={`btn ${
+                              isCurrentBinding
+                                ? "btn-secondary"
                                 : existingProfile && !modalTargetProfile
-                                ? "Mở Profile hiện có"
-                                : modalTargetProfile
-                                ? "Chọn liên kết"
-                                : "Tạo & Mở"}
-                            </button>
-                          ) : (
-                            <span style={{ fontSize: 10, color: "#ef4444", fontWeight: 500 }}>
-                              Không thể chọn
-                            </span>
-                          )}
+                                ? "btn-secondary"
+                                : "btn-primary"
+                            }`}
+                            style={{ padding: "4px 10px", fontSize: 11 }}
+                            disabled={actionLoading || isCurrentBinding}
+                            onClick={() => void handleSelectAccount(acc)}
+                          >
+                            {isCurrentBinding
+                              ? "Đang chọn"
+                              : existingProfile && !modalTargetProfile
+                              ? "Mở Profile hiện có"
+                              : modalTargetProfile
+                              ? "Chọn liên kết"
+                              : "Tạo & Mở"}
+                          </button>
                         </div>
                       </div>
                     );
