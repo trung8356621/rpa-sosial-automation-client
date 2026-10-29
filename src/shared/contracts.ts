@@ -141,7 +141,14 @@ export type ClientCommand =
   | { type: "getBrowserState" }
   | { type: "createBrowserForAccount"; account: AccountInfo }
   | { type: "deleteBrowserProfile"; browserId: string }
-  | { type: "openBrowser"; browserId: string; initialUrl?: string }
+  | {
+      type: "openBrowser";
+      browserId: string;
+      initialUrl?: string;
+      /** Explicit Action Tag context — required for automatic Auth Script. Omit to preserve manual login. */
+      actionTagId?: number;
+      actionTagKey?: string;
+    }
   | { type: "stopBrowser"; browserId?: string }
   | { type: "navigateBrowser"; url: string }
   | { type: "browserGoBack" }

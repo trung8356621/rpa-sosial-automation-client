@@ -5,6 +5,9 @@ import type { BrowserSyncService } from "./browser-sync-service.js";
 import { resolveInitialUrl } from "./url-resolver.js";
 import { evaluateSessionCookies, resolveSessionStrategy } from "./session-signal-strategy.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
+import type { BrowserOpenOrchestrator } from "../auth/browser-open-orchestrator.js";
+import type { AuthTagContext } from "../auth/auth-script-types.js";
+import type { AuthPipelineResult } from "../auth/outcomes.js";
 
 export class EmbeddedBrowser {
   private view: WebContentsView | null = null;
@@ -15,6 +18,8 @@ export class EmbeddedBrowser {
   private lastError: string | null = null;
   private bounds = { x: 260, y: 120, width: 680, height: 560 };
   private stateListeners = new Set<(state: BrowserViewState) => void>();
+  private authOrchestrator: BrowserOpenOrchestrator | null = null;
+  private lastAuthResult: AuthPipelineResult | null = null;
 
   constructor(
     private readonly window: BrowserWindow,
@@ -68,6 +73,14 @@ export class EmbeddedBrowser {
     return this.activeBrowserId;
   }
 
+  setAuthOrchestrator(orchestrator: BrowserOpenOrchestrator | null): void {
+    this.authOrchestrator = orchestrator;
+  }
+
+  getLastAuthResult(): AuthPipelineResult | null {
+    return this.lastAuthResult;
+  }
+
   setBounds(bounds: { x: number; y: number; width: number; height: number }): void {
     this.bounds = bounds;
     if (this.view) {
@@ -93,7 +106,7 @@ export class EmbeddedBrowser {
     }
   }
 
-  async open(browserId: string, initialUrl?: string): Promise<void> {
+  async open(browserId: string, initialUrl?: string, tag?: AuthTagContext | null): Promise<void> {
     const profile = this.profileManager.get(browserId);
     if (!profile) {
       throw new Error(`Profile ${browserId} không tồn tại.`);
@@ -115,6 +128,10 @@ export class EmbeddedBrowser {
         await this.navigate(initialUrl);
       }
       this.setVisible(true);
+      // Re-run Auth+Checkpoint only when explicit Tag context is provided (e.g. campaign open).
+      if (tag && (tag.actionTagId || tag.actionTagKey)) {
+        await this.runAuthPipeline(browserId, profile, tag);
+      }
       return;
     }
 
@@ -123,6 +140,7 @@ export class EmbeddedBrowser {
       accountId: profile.accountBinding?.accountId,
       accountName: profile.accountBinding?.accountName,
       partition: profile.partition,
+      hasActionTagContext: Boolean(tag?.actionTagId || tag?.actionTagKey),
     });
 
     const view = new WebContentsView({
@@ -208,11 +226,82 @@ export class EmbeddedBrowser {
       logClientError("Initial browser navigation failed", err);
     });
 
-    // Check session signal on browser open
-    void this.checkSessionSignal(browserId);
+    // Auth Script (optional Tag context) then existing Checkpoint — same partition.
+    await this.runAuthPipeline(browserId, profile, tag);
 
     // Sync status change to SEO-OPS
     void this.syncService.syncAll();
+  }
+
+  private async runAuthPipeline(
+    browserId: string,
+    profile: BrowserProfile,
+    tag?: AuthTagContext | null
+  ): Promise<void> {
+    const accountId = profile.accountBinding?.accountId;
+    if (!accountId) return;
+
+    const runCheckpoint = () => this.checkSessionSignal(browserId);
+
+    if (!this.authOrchestrator) {
+      // Compatibility: no orchestrator wired → existing Checkpoint only.
+      void runCheckpoint();
+      return;
+    }
+
+    try {
+      let username: string | null = null;
+      let email = profile.accountBinding?.email ?? null;
+      let siteUrl = profile.accountBinding?.siteUrl ?? null;
+      try {
+        const detail = await this.syncService.getAccount(accountId);
+        username = detail.username;
+        email = detail.email ?? email;
+        siteUrl = detail.siteUrl ?? siteUrl;
+      } catch {
+        // Offline / API failure — continue with local binding metadata; password fetch may still fail closed.
+      }
+
+      const result = await this.authOrchestrator.runAfterBrowserOpen({
+        browserId,
+        accountId,
+        partition: profile.partition,
+        tag,
+        webContents: this.view?.webContents,
+        account: {
+          accountId,
+          username,
+          email,
+          siteUrl,
+          getPassword: () => this.syncService.getAccountPassword(accountId),
+        },
+        runCheckpoint,
+      });
+      this.lastAuthResult = result;
+      logClientEvent("Auth pipeline finished", {
+        browserId,
+        code: result.code,
+        phase: result.phase,
+        authExecutionOk: result.authExecutionOk,
+        checkpointStatus: result.checkpointStatus,
+        packageKey: result.packageKey,
+        releaseId: result.releaseId,
+      });
+      if (
+        result.code === "AUTH_EXECUTION_FAILED" ||
+        result.code === "AUTH_TIMEOUT" ||
+        result.code === "AUTH_INTEGRITY_FAILED" ||
+        result.code === "AUTH_DOWNLOAD_FAILED" ||
+        result.code === "NO_ACCOUNT_TAG_ENTITLEMENT" ||
+        result.code === "CLIENT_LEASE_INVALID"
+      ) {
+        this.lastError = result.message;
+        this.notify();
+      }
+    } catch (err) {
+      logClientError("Auth pipeline unexpected error — Browser remains open for manual login", err);
+      void runCheckpoint();
+    }
   }
 
   async stop(): Promise<void> {

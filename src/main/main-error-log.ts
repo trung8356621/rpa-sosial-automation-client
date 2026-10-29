@@ -13,11 +13,14 @@ export function setLogListener(listener: ((entry: { time: string; level: string;
 }
 
 export function sanitizeLog(message: string): string {
-  // Strip Bearer tokens and sensitive key values
+  // Strip Bearer tokens, connection leases, passwords, and sensitive key values
   return message
     .replace(/Bearer\s+[A-Za-z0-9_\-.]+/gi, "Bearer [REDACTED]")
     .replace(/rpa_client_[A-Za-z0-9_]+/gi, "rpa_client_[REDACTED]")
-    .replace(/apiKey[:=]\s*["']?[^"'\s,]+["']?/gi, "apiKey=[REDACTED]");
+    .replace(/apiKey[:=]\s*["']?[^"'\s,]+["']?/gi, "apiKey=[REDACTED]")
+    .replace(/connection_token["']?\s*[:=]\s*["']?[^"'\s,]+["']?/gi, "connection_token=[REDACTED]")
+    .replace(/["']?password["']?\s*[:=]\s*["'][^"']*["']/gi, "password=[REDACTED]")
+    .replace(/["']?user_pass["']?\s*[:=]\s*["'][^"']*["']/gi, "user_pass=[REDACTED]");
 }
 
 export function logClientEvent(event: string, details?: unknown) {

@@ -16,6 +16,10 @@ import {
 import { ProfileManager } from "./browser/profile-manager.js";
 import { BrowserSyncService } from "./browser/browser-sync-service.js";
 import { EmbeddedBrowser } from "./browser/embedded-browser.js";
+import { AuthScriptResolver } from "./auth/auth-script-resolver.js";
+import { AuthScriptLoader } from "./auth/auth-script-loader.js";
+import { AuthScriptRunner } from "./auth/auth-script-runner.js";
+import { BrowserOpenOrchestrator } from "./auth/browser-open-orchestrator.js";
 import type { ClientCommand, BrowserStateSnapshot, ClientNotification } from "../shared/contracts.js";
 import { APP_USER_MODEL_ID } from "../shared/windows-notification.js";
 import { ClipboardService } from "./clipboard/clipboard-service.js";
@@ -205,6 +209,13 @@ async function bootstrap() {
 
   syncService = new BrowserSyncService(connection, profileManager, broadcastBrowserState);
   embeddedBrowser = new EmbeddedBrowser(mainWindow, profileManager, syncService);
+  embeddedBrowser.setAuthOrchestrator(
+    new BrowserOpenOrchestrator({
+      resolver: new AuthScriptResolver(connection),
+      loader: new AuthScriptLoader(connection),
+      runner: new AuthScriptRunner(),
+    })
+  );
   notificationOrchestrator = new NotificationOrchestrator(
     connection,
     syncService,
@@ -279,7 +290,10 @@ async function bootstrap() {
         return ok;
       }
       case "openBrowser": {
-        await embeddedBrowser!.open(cmd.browserId, cmd.initialUrl);
+        await embeddedBrowser!.open(cmd.browserId, cmd.initialUrl, {
+          actionTagId: cmd.actionTagId,
+          actionTagKey: cmd.actionTagKey,
+        });
         broadcastBrowserState();
         return getBrowserStateSnapshot();
       }

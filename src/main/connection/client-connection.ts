@@ -332,6 +332,11 @@ export class ClientConnection {
     return this.credentials.getKey();
   }
 
+  /** Active connection lease token — never log the return value. */
+  getConnectionToken(): string | null {
+    return this.connectionToken ?? null;
+  }
+
   isOnline(): boolean {
     return this.status === "connected" && this.online;
   }
