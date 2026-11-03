@@ -25,6 +25,8 @@ export function BrowserWorkspacePanel({
   const [activeAccount, setActiveAccount] = useState<AccountDetail | null>(null);
   const [accountError, setAccountError] = useState<string | null>(null);
   const [copyingPassword, setCopyingPassword] = useState(false);
+  const [usernameCopied, setUsernameCopied] = useState(false);
+  const usernameCopiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
 
@@ -100,17 +102,28 @@ export function BrowserWorkspacePanel({
   const currentWebsiteTag = detectBrowserTagFromUrl(viewState?.currentUrl || activeProfile?.lastUrl || "");
   const activeAccountId = activeProfile?.accountBinding?.accountId ?? null;
   const activeAccountEmail = activeAccount?.email ?? null;
+  const activeLoginId =
+    (activeAccount?.username && activeAccount.username.trim()) ||
+    (activeAccountEmail && activeAccountEmail.trim()) ||
+    null;
 
   useEffect(() => {
     let cancelled = false;
     setActiveAccount(null);
     setAccountError(null);
+    setUsernameCopied(false);
     if (!activeAccountId) return;
     void window.client.invoke<AccountDetail>({ type: "getAccount", accountId: activeAccountId })
       .then((account) => { if (!cancelled) setActiveAccount(account); })
       .catch((err: unknown) => { if (!cancelled) setAccountError((err as Error).message || "Không thể tải Account"); });
     return () => { cancelled = true; };
   }, [activeAccountId]);
+
+  useEffect(() => {
+    return () => {
+      if (usernameCopiedTimer.current) clearTimeout(usernameCopiedTimer.current);
+    };
+  }, []);
 
   // Domain mismatch check
   const domainMatches = isDomainMatchingAccount(
@@ -148,22 +161,47 @@ export function BrowserWorkspacePanel({
     }
   };
 
+  const handleCopyUsername = async () => {
+    if (!activeAccountId || !activeBrowserId || !activeLoginId) return;
+    try {
+      await window.client.invoke({
+        type: "copyAccountUsername",
+        accountId: activeAccountId,
+        browserId: activeBrowserId,
+      });
+      setUsernameCopied(true);
+      if (usernameCopiedTimer.current) clearTimeout(usernameCopiedTimer.current);
+      usernameCopiedTimer.current = setTimeout(() => setUsernameCopied(false), 1500);
+      onNotify?.("Đã copy username vào clipboard Browser");
+    } catch (err: unknown) {
+      alert((err as Error).message || "Không thể copy username");
+    }
+  };
+
   const handleCopyEmail = async () => {
     try {
-      if (!activeAccountId) return;
-      await window.client.invoke({ type: "copyAccountEmail", accountId: activeAccountId });
-      onNotify?.("Đã copy Email");
+      if (!activeAccountId || !activeBrowserId) return;
+      await window.client.invoke({
+        type: "copyAccountEmail",
+        accountId: activeAccountId,
+        browserId: activeBrowserId,
+      });
+      onNotify?.("Đã copy Email vào clipboard Browser");
     } catch (err: unknown) {
       alert((err as Error).message || "Không thể copy email");
     }
   };
 
   const handleCopyPassword = async () => {
-    if (!activeAccountId) return;
+    if (!activeAccountId || !activeBrowserId) return;
     setCopyingPassword(true);
     try {
-      await window.client.invoke({ type: "copyAccountPassword", accountId: activeAccountId });
-      onNotify?.("Đã copy mật khẩu");
+      await window.client.invoke({
+        type: "copyAccountPassword",
+        accountId: activeAccountId,
+        browserId: activeBrowserId,
+      });
+      onNotify?.("Đã copy mật khẩu vào clipboard Browser (Ctrl+V trong trang)");
     } catch (err: unknown) {
       alert((err as Error).message || "Không thể copy mật khẩu");
     } finally {
@@ -282,10 +320,19 @@ export function BrowserWorkspacePanel({
             {activeProfile.accountBinding?.accountId ? (
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <span className="account-tag-pill">
-                  👤 Account: {activeProfile.accountBinding.accountName || activeProfile.accountBinding.accountId.slice(0, 8)}
-                  {activeAccountEmail && (
-                    <span style={{ opacity: 0.85, marginLeft: 4 }}>({activeAccountEmail})</span>
-                  )}
+                  👤 Account: {activeProfile.accountBinding.accountName || "—"}
+                  {activeLoginId ? (
+                    <button
+                      type="button"
+                      className={`login-id-action ${usernameCopied ? "copied" : ""}`}
+                      onClick={() => void handleCopyUsername()}
+                      title="Click để copy username/login vào clipboard Browser"
+                    >
+                      {usernameCopied ? "Copied" : activeLoginId}
+                    </button>
+                  ) : activeAccount ? (
+                    <span style={{ opacity: 0.65, marginLeft: 4 }}>(chưa có username)</span>
+                  ) : null}
                   <span style={{ opacity: 0.65, marginLeft: 4 }}>[{activeProfile.platform}]</span>
                 </span>
 

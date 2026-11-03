@@ -8,6 +8,11 @@ import { logClientError, logClientEvent } from "../main-error-log.js";
 import type { BrowserOpenOrchestrator } from "../auth/browser-open-orchestrator.js";
 import type { AuthTagContext } from "../auth/auth-script-types.js";
 import type { AuthPipelineResult } from "../auth/outcomes.js";
+import {
+  attachBrowserClipboardIsolation,
+  resolveBrowserClipboardPreloadPath,
+  type BrowserClipboardIsolationHandle,
+} from "./browser-clipboard-isolation.js";
 
 export class EmbeddedBrowser {
   private view: WebContentsView | null = null;
@@ -20,6 +25,7 @@ export class EmbeddedBrowser {
   private stateListeners = new Set<(state: BrowserViewState) => void>();
   private authOrchestrator: BrowserOpenOrchestrator | null = null;
   private lastAuthResult: AuthPipelineResult | null = null;
+  private clipboardIsolation: BrowserClipboardIsolationHandle | null = null;
 
   constructor(
     private readonly window: BrowserWindow,
@@ -146,6 +152,7 @@ export class EmbeddedBrowser {
     const view = new WebContentsView({
       webPreferences: {
         partition: profile.partition,
+        preload: resolveBrowserClipboardPreloadPath(),
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
@@ -160,7 +167,11 @@ export class EmbeddedBrowser {
 
     const wc = view.webContents;
 
-    // Window open & navigation safety
+    // Per-profile virtual clipboard — never writes/reads OS clipboard.
+    this.clipboardIsolation?.dispose();
+    this.clipboardIsolation = attachBrowserClipboardIsolation(wc, browserId);
+
+    // Window open & navigation safety (popups stay in same isolated WebContents)
     wc.setWindowOpenHandler(({ url }) => {
       if (/^https?:\/\//.test(url)) {
         void this.navigate(url).catch(() => {});
@@ -273,7 +284,7 @@ export class EmbeddedBrowser {
           username,
           email,
           siteUrl,
-          getPassword: () => this.syncService.getAccountPassword(accountId),
+          getPassword: () => this.syncService.getAccountPassword(accountId, browserId),
         },
         runCheckpoint,
       });
@@ -317,6 +328,13 @@ export class EmbeddedBrowser {
 
     const stoppingId = this.activeBrowserId;
     logClientEvent("Stopping embedded browser view", { browserId: stoppingId });
+
+    try {
+      this.clipboardIsolation?.dispose();
+    } catch (err) {
+      logClientError("Error disposing clipboard isolation", err);
+    }
+    this.clipboardIsolation = null;
 
     try {
       // Flush storage & cookies before closing view

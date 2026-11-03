@@ -8,6 +8,7 @@ import type { ClientStore } from "../storage/store.js";
 import type { ClientCredentialStore } from "../storage/credential-store.js";
 import type { DeviceManager } from "../device/device-manager.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
+import { looksLikeEnrollmentBootstrapKey } from "./enrollment-bootstrap.js";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const INITIAL_BACKOFF_MS = 5_000;
@@ -91,6 +92,7 @@ export class ClientConnection {
   async connect(apiKey: string, endpointOverride?: string): Promise<ConnectionState> {
     this.stopHeartbeat();
     this.status = "connecting";
+    this.online = false;
     this.lastError = undefined;
     this.notify();
 
@@ -107,50 +109,93 @@ export class ClientConnection {
       throw new Error(this.lastError);
     }
 
+    const enrollmentBootstrap = looksLikeEnrollmentBootstrapKey(cleanKey);
+
     try {
-      logClientEvent("Validating client API key against endpoint", { endpoint });
-      const validateRes = await this.request(endpoint, "/api/v1/social-automation/client/validate", "GET", cleanKey);
-
-      const keyMeta = validateRes.client_api_key as Record<string, unknown> | undefined;
-      this.clientApiKeyId = typeof keyMeta?.id === "number" ? keyMeta.id : Number(keyMeta?.id) || undefined;
-
-      const installationId = String(
-        (validateRes.installation as Record<string, unknown>)?.installation_id ??
-          keyMeta?.installation_id ??
-          ""
-      );
-      this.installation = { installationId };
-
-      await this.credentials.setKey(cleanKey);
-
       // Restore prior connection lease token so restart does not self-lock.
       const savedToken = this.store.get().connectionToken;
       if (savedToken) {
         this.connectionToken = savedToken;
       }
 
-      await this.registerClient(endpoint, cleanKey);
+      if (enrollmentBootstrap) {
+        // TYPE A — Staff bootstrap: register-only Bearer. Never pre-call GET /validate.
+        logClientEvent("Enrollment bootstrap detected — register-first (skip pre-validate)", {
+          endpoint,
+          keyPrefixHint: cleanKey.slice(0, 19),
+        });
+        await this.registerClient(endpoint, cleanKey);
+        await this.credentials.setKey(cleanKey);
+        await this.refreshKeyMetadataAfterRegister(endpoint, cleanKey);
+      } else {
+        // TYPE B — persisted Client API Key: validate then register (legacy).
+        logClientEvent("Validating client API key against endpoint", { endpoint });
+        const validateRes = await this.request(
+          endpoint,
+          "/api/v1/social-automation/client/validate",
+          "GET",
+          cleanKey
+        );
+        this.applyValidateMetadata(validateRes);
+        await this.registerClient(endpoint, cleanKey);
+        await this.credentials.setKey(cleanKey);
+      }
 
       this.status = "connected";
       this.online = true;
       this.backoffMs = INITIAL_BACKOFF_MS;
       this.lastError = undefined;
       logClientEvent("Client successfully connected and registered", {
-        installationId,
+        installationId: this.installation?.installationId,
         clientApiKeyId: this.clientApiKeyId,
         agentUuid: this.agentUuid,
+        enrollmentBootstrap,
       });
 
       this.startHeartbeat();
       this.notify();
       return this.getState();
     } catch (err) {
+      this.stopHeartbeat();
       this.status = "error";
       this.online = false;
       this.lastError = formatClientHttpError(err);
+      // Failed enrollment must not leave a "connected" runtime; do not start heartbeat.
+      // Do not persist a key that never completed register (TYPE A never setKey on failure).
       logClientError("Connection failed", err);
       this.notify();
       throw new Error(this.lastError);
+    }
+  }
+
+  private applyValidateMetadata(validateRes: Record<string, unknown>): void {
+    const keyMeta = validateRes.client_api_key as Record<string, unknown> | undefined;
+    this.clientApiKeyId = typeof keyMeta?.id === "number" ? keyMeta.id : Number(keyMeta?.id) || undefined;
+
+    const installationId = String(
+      (validateRes.installation as Record<string, unknown>)?.installation_id ??
+        keyMeta?.installation_id ??
+        ""
+    );
+    this.installation = { installationId };
+  }
+
+  /**
+   * After bootstrap materialize+register, the same raw key is a persisted Client API Key.
+   * Optional validate fills client_api_key_id / installation for UI — failure here is non-fatal
+   * only if register already succeeded (caller already has lease).
+   */
+  private async refreshKeyMetadataAfterRegister(endpoint: string, apiKey: string): Promise<void> {
+    try {
+      const validateRes = await this.request(
+        endpoint,
+        "/api/v1/social-automation/client/validate",
+        "GET",
+        apiKey
+      );
+      this.applyValidateMetadata(validateRes);
+    } catch (err) {
+      logClientError("Post-register validate metadata refresh failed (connection remains)", err);
     }
   }
 

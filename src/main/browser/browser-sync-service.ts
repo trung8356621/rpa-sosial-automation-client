@@ -10,6 +10,7 @@ import {
   signalIsPresent,
   type RemoteSessionSignal,
 } from "../../shared/session-signal-sync.js";
+import { buildAccountPasswordPath } from "./account-credential-actions.js";
 
 export interface TargetBrowserPayload {
   browser_id: string;
@@ -196,7 +197,7 @@ export class BrowserSyncService {
       accountId: String(a.account_id),
       platform: String(a.platform),
       displayName: String(a.display_name),
-      username: null,
+      username: a.username ? String(a.username) : null,
       email: a.email ? String(a.email) : null,
       siteUrl: a.site_url ? String(a.site_url) : null,
       hasPassword: a.password_status === "available" || a.password_status === "forbidden",
@@ -206,11 +207,13 @@ export class BrowserSyncService {
     };
   }
 
-  async getAccountPassword(accountId: string): Promise<string> {
-    const res = await this.connection.requestWithAuth(
-      `/api/v1/social-automation/client/accounts/${encodeURIComponent(accountId)}/password`,
-      "GET"
-    );
+  /**
+   * CP18C: password requires the active Browser UUID as browser_id query param.
+   * Never uses Account ID or a generated UUID as browser_id.
+   */
+  async getAccountPassword(accountId: string, browserId: string): Promise<string> {
+    const path = buildAccountPasswordPath(accountId, browserId);
+    const res = await this.connection.requestWithAuth(path, "GET");
     if (typeof res.password !== "string") throw new Error("Password response is invalid");
     return res.password;
   }

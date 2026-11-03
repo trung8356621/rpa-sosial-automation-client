@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, clipboard } from "electron";
+import { app, BrowserWindow, ipcMain, Menu } from "electron";
 import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,7 +22,9 @@ import { AuthScriptRunner } from "./auth/auth-script-runner.js";
 import { BrowserOpenOrchestrator } from "./auth/browser-open-orchestrator.js";
 import type { ClientCommand, BrowserStateSnapshot, ClientNotification } from "../shared/contracts.js";
 import { APP_USER_MODEL_ID } from "../shared/windows-notification.js";
-import { ClipboardService } from "./clipboard/clipboard-service.js";
+import { sharedBrowserVirtualClipboard } from "./browser/browser-virtual-clipboard.js";
+import { resolveAccountLoginIdentifier } from "./browser/account-credential-actions.js";
+import { formatClientHttpError } from "../shared/seo-ops-http.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const project = path.resolve(root, "..");
@@ -90,7 +92,6 @@ const profileManager = new ProfileManager(userDataPath);
 let syncService: BrowserSyncService | null = null;
 let embeddedBrowser: EmbeddedBrowser | null = null;
 let notificationOrchestrator: NotificationOrchestrator | null = null;
-const clipboardService = new ClipboardService(clipboard);
 
 function showMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -111,6 +112,47 @@ function assertActiveAccount(accountId: string): void {
   if (!activeAccountId || activeAccountId !== accountId) {
     throw new Error("Account đang active đã thay đổi. Vui lòng thử lại.");
   }
+}
+
+/**
+ * Credential actions require the currently selected Browser UUID bound to the Account.
+ * Does not invent, substitute, or hardcode browser_id.
+ */
+function assertBrowserBoundToAccount(browserId: string, accountId: string): string {
+  const activeBrowserId = embeddedBrowser?.getActiveBrowserId();
+  if (!activeBrowserId) {
+    throw new Error("Chưa có Browser đang mở. Mở Browser trước khi lấy thông tin đăng nhập.");
+  }
+  if (!browserId || browserId !== activeBrowserId) {
+    throw new Error("Browser UUID không khớp Browser đang chọn.");
+  }
+  const profile = profileManager.get(browserId);
+  if (!profile) {
+    throw new Error("Không tìm thấy Browser Profile đang chọn.");
+  }
+  const boundAccountId = profile.accountBinding?.accountId ?? null;
+  if (!boundAccountId) {
+    throw new Error("Browser chưa liên kết Account. Không thể lấy mật khẩu (AccountCredentialGate).");
+  }
+  if (boundAccountId !== accountId) {
+    throw new Error("Browser không khớp Account đang chọn (binding mismatch).");
+  }
+  return browserId;
+}
+
+/** Write to per-Browser virtual clipboard — never OS clipboard for credentials. */
+function writeIsolatedCredentialClipboard(browserId: string, text: string): void {
+  if (!text) {
+    throw new Error("Không có nội dung để copy.");
+  }
+  sharedBrowserVirtualClipboard.write(browserId, text);
+  if (sharedBrowserVirtualClipboard.read(browserId) !== text) {
+    throw new Error("Clipboard nội bộ Browser không giữ đúng nội dung vừa copy.");
+  }
+}
+
+function rethrowCredentialError(err: unknown): never {
+  throw new Error(formatClientHttpError(err));
 }
 
 function getBrowserStateSnapshot(): BrowserStateSnapshot {
@@ -354,22 +396,46 @@ async function bootstrap() {
         return true;
       }
       case "copyAccountEmail": {
-        await clipboardService.copy(async () => {
+        try {
+          const browserId = assertBrowserBoundToAccount(cmd.browserId, cmd.accountId);
           assertActiveAccount(cmd.accountId);
           const email = await syncService!.getAccountEmail(cmd.accountId);
           assertActiveAccount(cmd.accountId);
-          return email;
-        });
-        return true;
+          writeIsolatedCredentialClipboard(browserId, email);
+          return true;
+        } catch (err) {
+          rethrowCredentialError(err);
+        }
+      }
+      case "copyAccountUsername": {
+        try {
+          const browserId = assertBrowserBoundToAccount(cmd.browserId, cmd.accountId);
+          assertActiveAccount(cmd.accountId);
+          const account = await syncService!.getAccount(cmd.accountId);
+          assertActiveAccount(cmd.accountId);
+          const login = resolveAccountLoginIdentifier(account);
+          if (!login) {
+            throw new Error("Account chưa có username/login để copy.");
+          }
+          writeIsolatedCredentialClipboard(browserId, login);
+          return true;
+        } catch (err) {
+          rethrowCredentialError(err);
+        }
       }
       case "copyAccountPassword": {
-        await clipboardService.copy(async () => {
+        try {
+          const browserId = assertBrowserBoundToAccount(cmd.browserId, cmd.accountId);
           assertActiveAccount(cmd.accountId);
-          const password = await syncService!.getAccountPassword(cmd.accountId);
+          const password = await syncService!.getAccountPassword(cmd.accountId, browserId);
           assertActiveAccount(cmd.accountId);
-          return password;
-        });
-        return true;
+          // Isolation policy: secrets go to Browser virtual clipboard only (Ctrl+V in page).
+          // Auth Script fill path remains separate via runner + verified selectors.
+          writeIsolatedCredentialClipboard(browserId, password);
+          return true;
+        } catch (err) {
+          rethrowCredentialError(err);
+        }
       }
       case "bindAccount": {
         const updated = await profileManager.bindAccount(

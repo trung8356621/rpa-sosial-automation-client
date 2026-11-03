@@ -31,25 +31,101 @@ export class SeoOpsHttpError extends Error {
 export function formatClientHttpError(error: unknown): string {
   if (error instanceof SeoOpsHttpError) {
     const d = error.diagnostic;
+    const code = typeof d.serverErrorCode === "string"
+      ? d.serverErrorCode.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80)
+      : "";
+
+    if (code === "enrollment_bootstrap_expired") {
+      return "Bootstrap Key đã hết hạn. Lấy key mới từ Staff Client Connection.";
+    }
+    if (code === "invalid_enrollment_bootstrap") {
+      return "Bootstrap Key không hợp lệ (chữ ký hoặc định dạng).";
+    }
+    if (code === "enrollment_bootstrap_not_authorized") {
+      return "Bootstrap Key chỉ dùng để đăng ký Client (register). Không dùng cho validate/heartbeat.";
+    }
+    if (code === "enrollment_installation_mismatch") {
+      return "Bootstrap Key không khớp Installation hiện tại.";
+    }
+    if (code === "enrollment_staff_mismatch") {
+      return "Bootstrap Key không thuộc Staff hiện tại.";
+    }
+    if (code === "staff_client_slot_taken" || code === "staff_already_connected") {
+      return "Staff đã có Client đang kết nối (409). Ngắt kết nối cũ trước khi enroll lại.";
+    }
     if (d.status === 401) {
-      if (d.serverErrorCode === 'key_revoked') return "API Key đã bị thu hồi (Revoked). Vui lòng tạo key mới.";
+      if (code === "key_revoked") return "API Key đã bị thu hồi (Revoked). Vui lòng tạo key mới.";
+      if (code) {
+        return d.serverErrorMessage
+          ? `${d.serverErrorMessage} (${code})`
+          : `Xác thực thất bại (${code}).`;
+      }
       return "API Key không hợp lệ hoặc đã hết hạn (401 Unauthorized).";
     }
-    if (d.status === 403) return "Quyền truy cập bị từ chối hoặc sai Installation (403 Forbidden).";
-    if (d.status === 404) return "Endpoint không tồn tại hoặc Client chưa đăng ký (404).";
-    if (d.status === 409 || d.serverErrorCode === "CLIENT_KEY_IN_USE") {
-      return "Client API Key đang được dùng bởi máy khác (CLIENT_KEY_IN_USE). Đợi kết nối cũ hết hạn hoặc ngắt máy kia.";
+    if (d.status === 403) {
+      if (code === "enrollment_installation_mismatch") {
+        return "Bootstrap Key không khớp Installation hiện tại.";
+      }
+      if (code === "browser_account_mismatch" || code === "account_binding_mismatch") {
+        return "Browser không khớp Account đang chọn (binding mismatch).";
+      }
+      if (
+        code === "client_ownership_denied" ||
+        code === "ownership_denied" ||
+        code === "browser_not_owned"
+      ) {
+        return "Client không sở hữu Browser này (ownership denied).";
+      }
+      return code
+        ? (d.serverErrorMessage ? `${d.serverErrorMessage} (${code})` : code)
+        : "Quyền truy cập bị từ chối hoặc sai Installation (403 Forbidden).";
+    }
+    if (d.status === 404) {
+      if (code === "browser_not_found") {
+        return "Browser chưa đồng bộ lên SEO-OPS hoặc không tồn tại (browser_not_found).";
+      }
+      return "Endpoint không tồn tại hoặc Client chưa đăng ký (404).";
+    }
+    if (d.status === 409 || code === "CLIENT_KEY_IN_USE") {
+      if (code === "CLIENT_KEY_IN_USE") {
+        return "Client API Key đang được dùng bởi máy khác (CLIENT_KEY_IN_USE). Đợi kết nối cũ hết hạn hoặc ngắt máy kia.";
+      }
+      return d.serverErrorMessage
+        ? `${d.serverErrorMessage} (${code || "conflict"})`
+        : `Xung đột đăng ký Client (${code || "409"}).`;
     }
     if (d.status === 429) return `Quá nhiều yêu cầu. Vui lòng thử lại sau ${d.retryAfterSeconds ?? 30}s.`;
     if (d.status >= 500) return `Máy chủ SEO-OPS gặp lỗi (${d.status}). Vui lòng kiểm tra backend.`;
     if (d.category === "network_error") return "Không thể kết nối đến máy chủ. Kiểm tra mạng hoặc endpoint.";
-    if (d.serverErrorCode) {
-      const code = d.serverErrorCode.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80);
+    if (code) {
       if (code === "fresh_session_signal_required") {
         return "Cần tín hiệu đăng nhập mới sau yêu cầu (fresh_session_signal_required).";
       }
       if (code === "browser_account_not_found") {
         return "Không tìm thấy Browser/Account trên thiết bị (browser_account_not_found).";
+      }
+      if (code === "browser_id_required") {
+        return "Yêu cầu mật khẩu cần Browser đang mở (browser_id_required).";
+      }
+      if (code === "browser_not_found") {
+        return "Browser chưa đồng bộ lên SEO-OPS hoặc không tồn tại (browser_not_found).";
+      }
+      if (code === "browser_account_mismatch" || code === "account_binding_mismatch") {
+        return "Browser không khớp Account đang chọn (binding mismatch).";
+      }
+      if (
+        code === "client_ownership_denied" ||
+        code === "ownership_denied" ||
+        code === "browser_not_owned"
+      ) {
+        return "Client không sở hữu Browser này (ownership denied).";
+      }
+      if (
+        code === "password_not_set" ||
+        code === "account_password_missing" ||
+        code === "no_password"
+      ) {
+        return "Account chưa có mật khẩu trên SEO-OPS.";
       }
       return d.serverErrorMessage ? `${d.serverErrorMessage} (${code})` : code;
     }

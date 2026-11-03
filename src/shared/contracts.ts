@@ -158,8 +158,9 @@ export type ClientCommand =
   | { type: "setBrowserViewVisible"; visible: boolean }
   | { type: "getAccounts"; platform?: string }
   | { type: "getAccount"; accountId: string }
-  | { type: "copyAccountEmail"; accountId: string }
-  | { type: "copyAccountPassword"; accountId: string }
+  | { type: "copyAccountEmail"; accountId: string; browserId: string }
+  | { type: "copyAccountUsername"; accountId: string; browserId: string }
+  | { type: "copyAccountPassword"; accountId: string; browserId: string }
   | { type: "bindAccount"; browserId: string; accountId: string; accountName?: string; platform?: string; email?: string | null; siteUrl?: string | null }
   | { type: "unbindAccount"; browserId: string }
   | { type: "checkSessionSignal"; browserId: string }
