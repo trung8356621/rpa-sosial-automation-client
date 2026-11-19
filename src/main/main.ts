@@ -21,6 +21,11 @@ import { AuthScriptLoader } from "./auth/auth-script-loader.js";
 import { AuthScriptRunner } from "./auth/auth-script-runner.js";
 import { BrowserOpenOrchestrator } from "./auth/browser-open-orchestrator.js";
 import { AuthContextFinder } from "./auth/auth-context-finder.js";
+import { CampaignJobApi } from "./jobs/campaign-job-api.js";
+import { CampaignJobExecutor } from "./jobs/campaign-job-executor.js";
+import { CampaignJobWorker } from "./jobs/campaign-job-worker.js";
+import { CampaignScriptLoader } from "./jobs/campaign-script-loader.js";
+import { createCampaignJobBrowserHost } from "./jobs/browser-host-adapter.js";
 import type { ClientCommand, BrowserStateSnapshot, ClientNotification } from "../shared/contracts.js";
 import { APP_USER_MODEL_ID } from "../shared/windows-notification.js";
 import { sharedBrowserVirtualClipboard } from "./browser/browser-virtual-clipboard.js";
@@ -93,6 +98,7 @@ const profileManager = new ProfileManager(userDataPath);
 let syncService: BrowserSyncService | null = null;
 let embeddedBrowser: EmbeddedBrowser | null = null;
 let notificationOrchestrator: NotificationOrchestrator | null = null;
+let campaignJobWorker: CampaignJobWorker | null = null;
 
 function showMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -261,6 +267,34 @@ async function bootstrap() {
       resolver: new AuthScriptResolver(connection),
       loader: new AuthScriptLoader(connection),
       runner: new AuthScriptRunner(),
+      getViewBounds: () => embeddedBrowser!.getBounds(),
+      applyViewport: (size) => embeddedBrowser!.applyAuthViewport(size),
+      restoreViewport: () => embeddedBrowser!.restoreAuthViewport(),
+      downloadAsset: async (params) => {
+        const { SeoOpsHttpError } = await import("../shared/seo-ops-http.js");
+        try {
+          const body = await connection.requestWithAuth(
+            "/api/v1/social-automation/client/auth/asset",
+            "POST",
+            {
+              connection_token: connection.getConnectionToken(),
+              account_id: params.accountId,
+              package_key: params.packageKey,
+              version: params.version,
+              release_id: params.releaseId,
+              asset_path: params.assetPath,
+              expected_sha256: params.expectedSha256,
+            }
+          );
+          return { status: 200, body };
+        } catch (err) {
+          if (err instanceof SeoOpsHttpError) {
+            return { status: err.diagnostic.status, body: { error: err.diagnostic.serverErrorCode } };
+          }
+          // Endpoint unreachable / missing → contract gap for ORC assets
+          return { status: 404, body: { error: "auth_asset_endpoint_unavailable" } };
+        }
+      },
     })
   );
   notificationOrchestrator = new NotificationOrchestrator(
@@ -269,6 +303,36 @@ async function bootstrap() {
     showMainWindow,
     broadcastNotifications,
   );
+
+  {
+    const scriptLoader = new CampaignScriptLoader(connection);
+    const jobApi = new CampaignJobApi(connection);
+    const jobHost = createCampaignJobBrowserHost({
+      embeddedBrowser,
+      profileManager,
+      syncService,
+    });
+    const jobExecutor = new CampaignJobExecutor(jobApi, scriptLoader, jobHost, new AuthScriptRunner());
+    campaignJobWorker = new CampaignJobWorker(
+      connection,
+      profileManager,
+      jobApi,
+      jobExecutor,
+      scriptLoader
+    );
+    // Contract gate can be OPEN while runtime claim stays opt-in — avoids accidental
+    // production claim during Desktop integration without RPA_CAMPAIGN_CLAIM=1.
+    const claimRuntime =
+      process.env.RPA_CAMPAIGN_CLAIM === "1" || process.env.RPA_CAMPAIGN_CLAIM === "true";
+    campaignJobWorker.setEnabled(claimRuntime);
+    const ready = campaignJobWorker.readiness();
+    logClientEvent("CAMPAIGN_JOB_WORKER_WIRED", {
+      jobsApi: ready.jobsApi,
+      scriptPullReady: ready.scriptPullReady,
+      claimRuntimeEnabled: claimRuntime,
+      gap: ready.gap?.code ?? null,
+    });
+  }
 
   embeddedBrowser.onViewStateChange(() => {
     broadcastBrowserState();
@@ -279,6 +343,7 @@ async function bootstrap() {
     connection,
     () => {
       isQuitting = true;
+      campaignJobWorker?.destroy();
       notificationOrchestrator?.destroy();
       trayManager?.destroy();
       app.quit();

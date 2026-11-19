@@ -1,0 +1,180 @@
+import { randomUUID } from "node:crypto";
+import type { WebContents } from "electron";
+import sharp from "sharp";
+import type { Capture, Rect } from "./contracts.js";
+
+/** Map screenshot image coords → WebContents DIP input (Creator geometry semantics). */
+export function imageToInput(
+  x: number,
+  y: number,
+  imageWidth: number,
+  imageHeight: number,
+  bounds: Rect
+): { x: number; y: number } {
+  if (
+    ![x, y, imageWidth, imageHeight].every(Number.isFinite) ||
+    imageWidth <= 0 ||
+    imageHeight <= 0 ||
+    x < 0 ||
+    y < 0 ||
+    x >= imageWidth ||
+    y >= imageHeight
+  ) {
+    throw new Error("Điểm ngoài ảnh.");
+  }
+  return {
+    x: Math.floor((x * bounds.width) / imageWidth),
+    y: Math.floor((y * bounds.height) / imageHeight),
+  };
+}
+
+/**
+ * Client adapter for Creator Visual ORC I/O against an embedded Browser WebContents.
+ * Programmatic sendInputEvent is not blocked by the interaction-lock overlay
+ * (overlay is a sibling WebContentsView; ORC targets this session's contents).
+ */
+export class OrcBrowserHost {
+  private captures = new Map<string, Buffer>();
+  private captureGate: Promise<void> = Promise.resolve();
+  zoom = 1;
+
+  constructor(
+    readonly webContents: WebContents,
+    /** DIP bounds of the browser view (click mapping). */
+    public bounds: Rect
+  ) {
+    try {
+      this.zoom = webContents.getZoomFactor();
+    } catch {
+      this.zoom = 1;
+    }
+  }
+
+  async setZoom(zoom: number): Promise<void> {
+    this.webContents.setZoomFactor(zoom);
+    this.zoom = zoom;
+  }
+
+  async capture(options?: { light?: boolean }): Promise<Capture> {
+    let release!: () => void;
+    const prev = this.captureGate;
+    this.captureGate = new Promise<void>((r) => {
+      release = r;
+    });
+    await prev;
+    try {
+      return await this.captureExclusive(options);
+    } finally {
+      release();
+    }
+  }
+
+  private async captureExclusive(options?: { light?: boolean }): Promise<Capture> {
+    const wc = this.webContents;
+    if (wc.isDestroyed()) throw new Error("WebContents destroyed");
+    const zoom = wc.getZoomFactor();
+    this.zoom = zoom;
+    let raw: Buffer;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      if (!wc.debugger.isAttached()) wc.debugger.attach("1.3");
+      await wc.debugger.sendCommand("Page.enable").catch(() => undefined);
+      const frame = await Promise.race([
+        wc.debugger.sendCommand("Page.captureScreenshot", {
+          format: "png",
+          fromSurface: true,
+          captureBeyondViewport: false,
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("Screenshot timeout: không có frame sau 4 giây.")),
+            4000
+          );
+        }),
+      ]);
+      raw = Buffer.from((frame as { data: string }).data, "base64");
+    } catch (e) {
+      if (wc.debugger.isAttached()) {
+        try {
+          wc.debugger.detach();
+        } catch {
+          /* ignore */
+        }
+      }
+      try {
+        const image = await wc.capturePage(undefined, { stayHidden: true });
+        raw = image.toPNG();
+      } catch {
+        throw e;
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (!raw.length) throw new Error("Browser trả về ảnh rỗng.");
+    const metadata = await sharp(raw).metadata();
+    const id = randomUUID();
+    this.captures.set(id, raw);
+    if (this.captures.size > 70) this.captures.delete(this.captures.keys().next().value!);
+    const width = metadata.width ?? this.bounds.width;
+    const height = metadata.height ?? this.bounds.height;
+    return {
+      id,
+      width,
+      height,
+      zoom,
+      url: wc.getURL(),
+      timestamp: new Date().toISOString(),
+      backend: "cdp-surface",
+      dataUrl: options?.light ? "" : `data:image/png;base64,${raw.toString("base64")}`,
+      bounds: { ...this.bounds },
+    };
+  }
+
+  captureBuffer(id: string): Buffer {
+    const b = this.captures.get(id);
+    if (!b) throw new Error("Ảnh đã hết hạn; chụp lại.");
+    return b;
+  }
+
+  click(x: number, y: number, imageWidth: number, imageHeight: number): void {
+    const p = imageToInput(x, y, imageWidth, imageHeight, this.bounds);
+    this.webContents.focus();
+    this.webContents.sendInputEvent({ type: "mouseMove", ...p });
+    this.webContents.sendInputEvent({
+      type: "mouseDown",
+      ...p,
+      button: "left",
+      clickCount: 1,
+    });
+    this.webContents.sendInputEvent({
+      type: "mouseUp",
+      ...p,
+      button: "left",
+      clickCount: 1,
+    });
+  }
+
+  scroll(deltaY: number): void {
+    const x = Math.round(this.bounds.width / 2);
+    const y = Math.round(this.bounds.height / 2);
+    this.webContents.sendInputEvent({ type: "mouseMove", x, y });
+    this.webContents.sendInputEvent({
+      type: "mouseWheel",
+      x,
+      y,
+      deltaY,
+      deltaX: 0,
+    });
+  }
+
+  /** Keyboard insert into currently focused element (Creator TYPE path lite). */
+  async typeText(text: string): Promise<void> {
+    if (!text || text.length > 20_000) {
+      throw new Error("Nội dung cần từ 1 đến 20.000 ký tự.");
+    }
+    this.webContents.focus();
+    for (const ch of text) {
+      this.webContents.sendInputEvent({ type: "char", keyCode: ch });
+    }
+  }
+}

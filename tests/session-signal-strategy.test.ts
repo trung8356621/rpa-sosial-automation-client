@@ -15,6 +15,13 @@ test("WordPress detection supports auth cookie prefixes and subdirectory install
   assert.equal(evaluateSessionCookies("wordpress", [{ name: "wordpress_test_cookie" }], "now").status, "absent");
 });
 
+test("Navigation pending / login URL without cookies stays absent (no false present)", () => {
+  assert.equal(
+    evaluateSessionCookies("wordpress", [], "now").status,
+    "absent"
+  );
+});
+
 test("Facebook, unsupported and logout states stay distinct", () => {
   assert.equal(evaluateSessionCookies("facebook", [{ name: "c_user" }], "now").status, "present");
   assert.equal(evaluateSessionCookies("facebook", [], "now").status, "absent");

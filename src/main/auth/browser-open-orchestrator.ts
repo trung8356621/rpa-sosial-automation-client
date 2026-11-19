@@ -3,18 +3,24 @@ import type { SessionSignal } from "../../shared/contracts.js";
 import { logClientEvent } from "../main-error-log.js";
 import { AuthScriptLoader } from "./auth-script-loader.js";
 import { AuthScriptResolver } from "./auth-script-resolver.js";
-import type { AuthRunOutcome, AuthScriptRunner } from "./auth-script-runner.js";
+import type { AuthRunOutcome } from "./auth-script-runner.js";
 import type { AccountCredentialSource } from "./credential-mapper.js";
 import { hasExplicitTagContext, type AuthReleasePulled, type AuthTagContext } from "./auth-script-types.js";
 import type { AuthPipelineResult } from "./outcomes.js";
+import type { AuthAssetDownloader } from "../orc/asset-store.js";
 
-export type AuthRunnerLike = Pick<AuthScriptRunner, "run"> | {
+export type AuthRunnerLike = {
   run: (params: {
     webContents: WebContents;
     release: AuthReleasePulled;
     account: AccountCredentialSource;
+    accountId?: string;
     timeoutMs?: number;
     signal?: AbortSignal;
+    viewBounds?: { x: number; y: number; width: number; height: number };
+    applyViewport?: (bounds: { width: number; height: number }) => void | Promise<void>;
+    restoreViewport?: () => void | Promise<void>;
+    downloadAsset?: AuthAssetDownloader;
   }) => Promise<AuthRunOutcome>;
 };
 
@@ -22,6 +28,10 @@ export type BrowserOpenAuthDeps = {
   resolver: AuthScriptResolver;
   loader: AuthScriptLoader;
   runner: AuthRunnerLike;
+  downloadAsset?: AuthAssetDownloader;
+  getViewBounds?: () => { x: number; y: number; width: number; height: number };
+  applyViewport?: (bounds: { width: number; height: number }) => void | Promise<void>;
+  restoreViewport?: () => void | Promise<void>;
 };
 
 /**
@@ -49,7 +59,7 @@ export class BrowserOpenOrchestrator {
     tag?: AuthTagContext | null;
     webContents: WebContents | null | undefined;
     account: AccountCredentialSource;
-    runCheckpoint: () => Promise<SessionSignal>;
+    runCheckpoint: (opts?: { settle?: boolean }) => Promise<SessionSignal>;
     signal?: AbortSignal;
   }): Promise<AuthPipelineResult> {
     const existing = this.inFlight.get(params.browserId);
@@ -79,7 +89,7 @@ export class BrowserOpenOrchestrator {
     tag?: AuthTagContext | null;
     webContents: WebContents | null | undefined;
     account: AccountCredentialSource;
-    runCheckpoint: () => Promise<SessionSignal>;
+    runCheckpoint: (opts?: { settle?: boolean }) => Promise<SessionSignal>;
     signal?: AbortSignal;
   }): Promise<AuthPipelineResult> {
     const { browserId, accountId, partition, tag, webContents, account, runCheckpoint, signal } =
@@ -112,7 +122,8 @@ export class BrowserOpenOrchestrator {
     }
 
     // 1) Session / Checkpoint first — never Auth when already logged in.
-    const initial = await runCheckpoint();
+    // Settle so we do not false-negative while WP redirect/DOM is still settling.
+    const initial = await runCheckpoint({ settle: true });
     logClientEvent("SESSION_CHECK", {
       browserId,
       accountId,
@@ -130,6 +141,7 @@ export class BrowserOpenOrchestrator {
         accountId,
         actionTagId: tag?.actionTagId,
         actionTagKey: tag?.actionTagKey,
+        authRuns: 0,
       });
       return {
         code: "SESSION_VALID",
@@ -137,6 +149,33 @@ export class BrowserOpenOrchestrator {
         authExecutionOk: false,
         checkpointStatus: "present",
         message: "Session/Checkpoint hợp lệ — bỏ qua Authentication Script (0 lần).",
+        actionTagId: tag?.actionTagId,
+        actionTagKey: tag?.actionTagKey,
+        authRuns: 0,
+      };
+    }
+
+    // UNKNOWN / error / unsupported are NOT "logged out" — do not auto-run Auth.
+    if (
+      initial.status === "unknown" ||
+      initial.status === "error" ||
+      initial.status === "unsupported"
+    ) {
+      logClientEvent("AUTH_SKIPPED", {
+        reason: "SESSION_UNKNOWN",
+        browserId,
+        accountId,
+        checkpointStatus: initial.status,
+        actionTagId: tag?.actionTagId,
+        actionTagKey: tag?.actionTagKey,
+        authRuns: 0,
+      });
+      return {
+        code: "SESSION_UNKNOWN",
+        phase: "skipped",
+        authExecutionOk: false,
+        checkpointStatus: initial.status,
+        message: `Checkpoint ${initial.status} — không chạy Auth (không suy ra logout).`,
         actionTagId: tag?.actionTagId,
         actionTagKey: tag?.actionTagKey,
         authRuns: 0,
@@ -304,7 +343,12 @@ export class BrowserOpenOrchestrator {
       webContents,
       release: loaded.release,
       account,
+      accountId,
       signal,
+      viewBounds: this.deps.getViewBounds?.(),
+      applyViewport: this.deps.applyViewport,
+      restoreViewport: this.deps.restoreViewport,
+      downloadAsset: this.deps.downloadAsset,
     });
 
     if (run.kind === "cancelled") {
@@ -343,6 +387,92 @@ export class BrowserOpenOrchestrator {
         phase: "execute",
         authExecutionOk: false,
         checkpointStatus: initial.status,
+        message: run.message,
+        packageKey: expected.package_key,
+        releaseId: expected.release_id,
+        version: expected.version,
+        contentDigest: expected.content_digest,
+        actionTagId: expected.action_tag_id,
+        actionTagKey: expected.action_tag_key,
+        authRuns,
+      };
+    }
+
+    if (run.kind === "orc_unavailable") {
+      const afterOrc = await runCheckpoint();
+      logClientEvent("AUTH_FAILED", {
+        phase: "execute",
+        code: "ORC_RUNTIME_UNAVAILABLE",
+        browserId,
+        stepIndex: run.stepIndex,
+        stepsExecuted: run.stepsExecuted,
+        packageKey: expected.package_key,
+        releaseId: expected.release_id,
+        version: expected.version,
+        checkpointStatus: afterOrc.status,
+      });
+      return {
+        code: "ORC_RUNTIME_UNAVAILABLE",
+        phase: "execute",
+        authExecutionOk: false,
+        checkpointStatus: afterOrc.status,
+        message: run.message,
+        packageKey: expected.package_key,
+        releaseId: expected.release_id,
+        version: expected.version,
+        contentDigest: expected.content_digest,
+        actionTagId: expected.action_tag_id,
+        actionTagKey: expected.action_tag_key,
+        authRuns,
+      };
+    }
+
+    if (run.kind === "asset_unavailable") {
+      const afterAsset = await runCheckpoint();
+      logClientEvent("AUTH_FAILED", {
+        phase: "execute",
+        code: run.code,
+        browserId,
+        stepsExecuted: run.stepsExecuted,
+        packageKey: expected.package_key,
+        releaseId: expected.release_id,
+        version: expected.version,
+        checkpointStatus: afterAsset.status,
+      });
+      return {
+        code: run.code,
+        phase: "execute",
+        authExecutionOk: false,
+        checkpointStatus: afterAsset.status,
+        message: run.message,
+        packageKey: expected.package_key,
+        releaseId: expected.release_id,
+        version: expected.version,
+        contentDigest: expected.content_digest,
+        actionTagId: expected.action_tag_id,
+        actionTagKey: expected.action_tag_key,
+        authRuns,
+      };
+    }
+
+    if (run.kind === "viewport_mismatch") {
+      const afterVp = await runCheckpoint();
+      logClientEvent("AUTH_FAILED", {
+        phase: "execute",
+        code: "VIEWPORT_MISMATCH",
+        browserId,
+        stepIndex: run.stepIndex,
+        stepsExecuted: run.stepsExecuted,
+        packageKey: expected.package_key,
+        releaseId: expected.release_id,
+        version: expected.version,
+        checkpointStatus: afterVp.status,
+      });
+      return {
+        code: "VIEWPORT_MISMATCH",
+        phase: "execute",
+        authExecutionOk: false,
+        checkpointStatus: afterVp.status,
         message: run.message,
         packageKey: expected.package_key,
         releaseId: expected.release_id,
@@ -403,10 +533,12 @@ export class BrowserOpenOrchestrator {
     }
 
     // 3) Auth steps finished ≠ login success — Checkpoint is authoritative.
-    const cp = await runCheckpoint();
+    // Wait for WP redirect + cookies/DOM; do not conclude absent mid-navigation.
+    const cp = await runCheckpoint({ settle: true });
     logClientEvent("SESSION_CHECK", {
       browserId,
       accountId,
+      partition,
       phase: "post_auth",
       status: cp.status,
       method: cp.method,

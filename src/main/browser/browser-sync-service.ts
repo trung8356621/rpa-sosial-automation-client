@@ -29,7 +29,12 @@ export interface TargetBrowserPayload {
     present: boolean;
     status: "present" | "absent" | "unsupported" | "error" | "unknown";
     checked_at: string | null;
-    method: "facebook_c_user_cookie" | "wordpress_auth_cookie" | "site_cookie_presence" | null;
+    method:
+      | "facebook_c_user_cookie"
+      | "wordpress_auth_cookie"
+      | "wordpress_admin_dom"
+      | "site_cookie_presence"
+      | null;
   };
   execution_confirmation: {
     status: "not_run" | "pending_review" | "confirmed" | "failed";

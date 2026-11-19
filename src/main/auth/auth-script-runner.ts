@@ -6,27 +6,63 @@ import {
   type AccountCredentialSource,
 } from "./credential-mapper.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
+import {
+  classifyAuthStep,
+  normalizeAuthAction,
+  resolveDomSelector,
+  sanitizeStepMeta,
+} from "./auth-step-classify.js";
+import {
+  OrcAssetStore,
+  type AuthAssetDownloader,
+  type ManifestAsset,
+} from "../orc/asset-store.js";
+import { VisualOrcExecutor } from "../orc/visual-executor.js";
+import { authStepToVisualPayload } from "../orc/step-to-payload.js";
+import type { Rect } from "../orc/contracts.js";
 
 export type AuthRunOutcome =
   | { kind: "ok"; stepsExecuted: number }
   | { kind: "timeout"; message: string; stepsExecuted: number }
   | { kind: "cancelled"; message: string; stepsExecuted: number }
   | { kind: "human_required"; message: string; stepsExecuted: number }
+  | { kind: "orc_unavailable"; message: string; stepsExecuted: number; stepIndex: number }
+  | {
+      kind: "asset_unavailable";
+      message: string;
+      stepsExecuted: number;
+      code: "ASSET_DOWNLOAD_UNAVAILABLE" | "ASSET_INTEGRITY_FAILED" | "ASSET_MISSING";
+    }
+  | { kind: "viewport_mismatch"; message: string; stepsExecuted: number; stepIndex: number }
   | { kind: "error"; message: string; stepsExecuted: number };
 
-const DEFAULT_TIMEOUT_MS = 60_000;
+const DEFAULT_TIMEOUT_MS = 120_000;
+const CREATOR_VIEWPORT: Rect = { x: 0, y: 0, width: 1024, height: 560 };
 
 /**
- * Executes Auth Script steps through the SAME Browser WebContents (same partition).
- * WordPress-first: DOM selector actions only. OCR / image Match-To steps fail closed.
+ * Shared Auth/Action execution entry: DOM steps + Creator Visual ORC.
+ * Visual path uses vendored ORC core (Admin baseline 8c06ef86) — not a second engine.
  */
 export class AuthScriptRunner {
+  constructor(
+    private readonly assetStore: OrcAssetStore = new OrcAssetStore(),
+  ) {}
+
   async run(params: {
     webContents: WebContents;
     release: AuthReleasePulled;
     account: AccountCredentialSource;
+    accountId?: string;
     timeoutMs?: number;
     signal?: AbortSignal;
+    /** DIP bounds of embedded browser view — resized to Creator env when needed. */
+    viewBounds?: Rect;
+    /** Apply temporary viewport during ORC (restore after). */
+    applyViewport?: (bounds: { width: number; height: number }) => void | Promise<void>;
+    restoreViewport?: () => void | Promise<void>;
+    downloadAsset?: AuthAssetDownloader;
+    /** Job/campaign input bindings (e.g. title) merged after credential resolve. */
+    inputValues?: Record<string, string>;
   }): Promise<AuthRunOutcome> {
     const { webContents, release, account, signal } = params;
     const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -40,20 +76,81 @@ export class AuthScriptRunner {
       return { kind: "error", message: "Auth manifest không có steps", stepsExecuted: 0 };
     }
 
-    for (let i = 0; i < steps.length; i++) {
-      const unsupported = describeUnsupportedStep(steps[i]);
-      if (unsupported) {
+    const classifications = steps.map((s, i) => ({
+      i,
+      c: classifyAuthStep(s),
+      meta: sanitizeStepMeta(s, i),
+    }));
+    logClientEvent("AUTH_STEP_CLASSIFIED", {
+      packageKey: release.package_key,
+      releaseId: release.release_id,
+      version: release.version,
+      steps: classifications.map((x) => x.meta),
+      orcBaseline: "8c06ef86179d7f90c21bdba81bf6a768227e148e",
+    });
+
+    for (const { i, c } of classifications) {
+      if (c.kind === "unsupported") {
+        return { kind: "error", message: `Step ${i}: ${c.reason}`, stepsExecuted: 0 };
+      }
+    }
+
+    const needsOrc = classifications.some((x) => x.c.kind === "orc_visual");
+    let templates: Map<string, Buffer> | null = null;
+
+    if (needsOrc) {
+      if (!params.downloadAsset) {
         return {
-          kind: "error",
-          message: `Step ${i}: ${unsupported}`,
+          kind: "asset_unavailable",
+          code: "ASSET_DOWNLOAD_UNAVAILABLE",
+          message:
+            "CONTRACT GAP: Visual ORC requires Client asset download (POST /client/auth/asset). Auth runner has ORC core but no download adapter wired.",
           stepsExecuted: 0,
         };
       }
+      const assets = Array.isArray(manifest.assets)
+        ? (manifest.assets as ManifestAsset[])
+        : [];
+      if (assets.length === 0) {
+        return {
+          kind: "asset_unavailable",
+          code: "ASSET_MISSING",
+          message: "Visual ORC manifest có steps nhưng không khai báo assets[].",
+          stepsExecuted: 0,
+        };
+      }
+      const loaded = await this.assetStore.ensureAssets({
+        accountId: params.accountId || account.accountId,
+        packageKey: release.package_key,
+        version: release.version,
+        releaseId: release.release_id,
+        assets,
+        download: params.downloadAsset,
+      });
+      if (!loaded.ok) {
+        return {
+          kind: "asset_unavailable",
+          code: loaded.code as
+            | "ASSET_DOWNLOAD_UNAVAILABLE"
+            | "ASSET_INTEGRITY_FAILED"
+            | "ASSET_MISSING",
+          message: loaded.message,
+          stepsExecuted: 0,
+        };
+      }
+      templates = loaded.byPath;
     }
 
     const bindings = await resolveCredentialBindings(variables, account);
     if (!bindings.ok) {
       return { kind: "error", message: bindings.message, stepsExecuted: 0 };
+    }
+    if (params.inputValues) {
+      for (const [key, value] of Object.entries(params.inputValues)) {
+        if (key && typeof value === "string") {
+          bindings.values[key] = value;
+        }
+      }
     }
 
     logClientEvent("AUTH_EXECUTION_STARTED", {
@@ -61,14 +158,40 @@ export class AuthScriptRunner {
       version: release.version,
       releaseId: release.release_id,
       stepCount: steps.length,
-      // Never log binding values
       variableKeys: variables.map((v) => v.key).filter(Boolean),
+      mode: needsOrc ? "dom+orc" : "dom",
     });
 
     let stepsExecuted = 0;
     const deadline = Date.now() + timeoutMs;
+    let viewportApplied = false;
 
     try {
+      if (needsOrc && params.applyViewport) {
+        // Creator default execution viewport (environment may refine per-step).
+        await params.applyViewport({
+          width: CREATOR_VIEWPORT.width,
+          height: CREATOR_VIEWPORT.height,
+        });
+        viewportApplied = true;
+      }
+
+      const viewBounds: Rect = params.viewBounds
+        ? { ...params.viewBounds }
+        : needsOrc
+          ? { ...CREATOR_VIEWPORT }
+          : { x: 0, y: 0, width: 1024, height: 560 };
+
+      const orc =
+        needsOrc && templates
+          ? VisualOrcExecutor.fromWebContents(webContents, {
+              x: 0,
+              y: 0,
+              width: viewBounds.width || CREATOR_VIEWPORT.width,
+              height: viewBounds.height || CREATOR_VIEWPORT.height,
+            })
+          : null;
+
       for (let i = 0; i < steps.length; i++) {
         if (signal?.aborted) {
           return {
@@ -84,25 +207,102 @@ export class AuthScriptRunner {
             stepsExecuted,
           };
         }
+
         const step = steps[i];
-        await executeDomStep(webContents, step, bindings.values, deadline);
+        const kind = classifications[i].c.kind;
+
+        if (kind === "dom") {
+          await executeDomStep(webContents, step, bindings.values, deadline);
+        } else if (kind === "orc_visual") {
+          if (!orc || !templates) {
+            return {
+              kind: "orc_unavailable",
+              message: `Step ${i}: ORC executor not initialized`,
+              stepsExecuted,
+              stepIndex: i,
+            };
+          }
+          const payload = authStepToVisualPayload(step);
+          if (!payload?.target?.asset) {
+            return {
+              kind: "error",
+              message: `Step ${i}: không map được Creator visual payload`,
+              stepsExecuted,
+            };
+          }
+          const template = this.assetStore.resolveTemplate(templates, payload.target.asset);
+          if (!template) {
+            return {
+              kind: "asset_unavailable",
+              code: "ASSET_MISSING",
+              message: `Step ${i}: thiếu asset binary ${payload.target.asset}`,
+              stepsExecuted,
+            };
+          }
+          const varKey = String(step.variable_key || step.variable || "").trim();
+          const text =
+            (varKey && bindings.values[varKey]) ||
+            (typeof step.value === "string" ? step.value : undefined) ||
+            payload.text;
+
+          // Per-step environment may request exact Creator size.
+          if (payload.target.environment && params.applyViewport) {
+            await params.applyViewport({
+              width: payload.target.environment.width,
+              height: payload.target.environment.height,
+            });
+            orc.setBounds({
+              x: 0,
+              y: 0,
+              width: payload.target.environment.width,
+              height: payload.target.environment.height,
+            });
+          }
+
+          const out = await orc.executeVisualStep({
+            payload,
+            template,
+            text,
+            signal,
+          });
+          if (out.kind === "blocked" && out.code === "CANCELLED") {
+            return {
+              kind: "cancelled",
+              message: out.message,
+              stepsExecuted,
+            };
+          }
+          if (out.kind === "blocked" && out.code === "VIEWPORT_MISMATCH") {
+            return {
+              kind: "viewport_mismatch",
+              message: `Step ${i}: ${out.message}`,
+              stepsExecuted,
+              stepIndex: i,
+            };
+          }
+          if (out.kind !== "ok") {
+            return {
+              kind: "error",
+              message: `Step ${i}: ${out.message}`,
+              stepsExecuted,
+            };
+          }
+        }
+
         stepsExecuted += 1;
         logClientEvent("AUTH_STEP_COMPLETED", {
           packageKey: release.package_key,
           releaseId: release.release_id,
           version: release.version,
           stepIndex: i,
-          action: normalizeAction(step.action),
+          action: normalizeAuthAction(step.action),
+          kind,
           stepsExecuted,
         });
 
         const human = await detectHumanRequired(webContents);
         if (human) {
-          return {
-            kind: "human_required",
-            message: human,
-            stepsExecuted,
-          };
+          return { kind: "human_required", message: human, stepsExecuted };
         }
       }
       return { kind: "ok", stepsExecuted };
@@ -119,15 +319,36 @@ export class AuthScriptRunner {
         packageKey: release.package_key,
         releaseId: release.release_id,
         stepsExecuted,
-        // Sanitize any accidental secret leakage in error messages
         error: String(redactSecretsForLog(message)),
       });
       return { kind: "error", message, stepsExecuted };
+    } finally {
+      if (viewportApplied && params.restoreViewport) {
+        try {
+          await params.restoreViewport();
+        } catch {
+          /* ignore */
+        }
+      }
     }
   }
 }
 
-/** Detect common CAPTCHA / verification gates — never bypass; unlock for human. */
+/** @deprecated Prefer classifyAuthStep — kept for tests / callers. */
+export function describeUnsupportedStep(step: AuthScriptStep): string | null {
+  const c = classifyAuthStep(step);
+  if (c.kind === "dom") return null;
+  if (c.kind === "orc_visual") {
+    return `ORC_RUNTIME_UNAVAILABLE: ${c.reason}`;
+  }
+  return c.reason;
+}
+
+/** @deprecated Prefer resolveDomSelector */
+export function resolveSelector(step: AuthScriptStep): string {
+  return resolveDomSelector(step);
+}
+
 async function detectHumanRequired(webContents: WebContents): Promise<string | null> {
   try {
     const hit = await webContents.executeJavaScript(
@@ -156,85 +377,13 @@ async function detectHumanRequired(webContents: WebContents): Promise<string | n
   return null;
 }
 
-export function describeUnsupportedStep(step: AuthScriptStep): string | null {
-  if (!step || typeof step !== "object") return "step không hợp lệ";
-  for (const forbidden of ["code", "executable", "eval", "account_switch", "switch_account", "change_account"]) {
-    if (Object.prototype.hasOwnProperty.call(step, forbidden)) {
-      return `forbidden field ${forbidden}`;
-    }
-  }
-  const target = step.target;
-  if (target && typeof target === "object") {
-    const matchTo = (target as { matchTo?: unknown }).matchTo;
-    if (matchTo === "top" || matchTo === "middle" || matchTo === "bottom") {
-      return "OCR/image Match-To không được dùng cho WordPress-first Auth (DOM only)";
-    }
-    if ((target as { ocr?: unknown }).ocr) {
-      return "OCR target không được hỗ trợ trong Auth runner DOM-first";
-    }
-    if ((target as { image?: unknown }).image || (target as { template?: unknown }).template) {
-      return "Image template target không được hỗ trợ trong Auth runner DOM-first";
-    }
-  }
-  const action = normalizeAction(step.action);
-  if (!action) return "thiếu action";
-  if (!SUPPORTED_ACTIONS.has(action)) {
-    return `action không hỗ trợ: ${action}`;
-  }
-  if ((action === "fill" || action === "type" || action === "click" || action === "submit") && !resolveSelector(step)) {
-    return `action ${action} cần CSS selector`;
-  }
-  return null;
-}
-
-const SUPPORTED_ACTIONS = new Set([
-  "navigate",
-  "goto",
-  "open_url",
-  "fill",
-  "type",
-  "type_text",
-  "click",
-  "click_target",
-  "wait",
-  "wait_ms",
-  "submit",
-]);
-
-function normalizeAction(action: unknown): string {
-  return String(action || "")
-    .trim()
-    .toLowerCase()
-    .replace(/-/g, "_");
-}
-
-/**
- * Resolve CSS selector from flat step fields or Script Creator `target` object.
- * Does not invent selectors; unsupported OCR/image targets are rejected earlier.
- */
-export function resolveSelector(step: AuthScriptStep): string {
-  const direct = String(step.selector || step.css || "").trim();
-  if (direct) return direct;
-  const target = step.target;
-  if (target && typeof target === "object") {
-    const nested = String(
-      (target as { selector?: unknown; css?: unknown; query?: unknown }).selector ||
-        (target as { css?: unknown }).css ||
-        (target as { query?: unknown }).query ||
-        ""
-    ).trim();
-    if (nested) return nested;
-  }
-  return "";
-}
-
 async function executeDomStep(
   webContents: WebContents,
   step: AuthScriptStep,
   values: Record<string, string>,
   deadline: number
 ): Promise<void> {
-  const action = normalizeAction(step.action);
+  const action = normalizeAuthAction(step.action);
   const remaining = () => Math.max(0, deadline - Date.now());
 
   if (action === "navigate" || action === "goto" || action === "open_url") {
@@ -247,7 +396,7 @@ async function executeDomStep(
   }
 
   if (action === "wait" || action === "wait_ms") {
-    const selector = resolveSelector(step);
+    const selector = resolveDomSelector(step);
     const ms = Number(step.ms ?? step.timeout_ms ?? 500);
     if (selector) {
       await waitForSelector(webContents, selector, Math.min(remaining(), Math.max(ms, 1000)));
@@ -258,7 +407,7 @@ async function executeDomStep(
   }
 
   if (action === "fill" || action === "type" || action === "type_text") {
-    const selector = resolveSelector(step);
+    const selector = resolveDomSelector(step);
     const value = resolveStepValue(step, values);
     await waitForSelector(webContents, selector, Math.min(remaining(), 15_000));
     await webContents.executeJavaScript(
@@ -269,14 +418,14 @@ async function executeDomStep(
   }
 
   if (action === "click" || action === "click_target") {
-    const selector = resolveSelector(step);
+    const selector = resolveDomSelector(step);
     await waitForSelector(webContents, selector, Math.min(remaining(), 15_000));
     await webContents.executeJavaScript(`(${clickFn.toString()})(${JSON.stringify(selector)})`, true);
     return;
   }
 
   if (action === "submit") {
-    const selector = resolveSelector(step) || "form";
+    const selector = resolveDomSelector(step) || "form";
     await waitForSelector(webContents, selector, Math.min(remaining(), 15_000));
     await webContents.executeJavaScript(`(${submitFn.toString()})(${JSON.stringify(selector)})`, true);
     return;
@@ -341,14 +490,12 @@ function submitFn(selector: string): boolean {
   const el = document.querySelector(selector);
   if (!el) throw new Error("element not found");
   if (el instanceof HTMLFormElement) {
-    if (typeof el.requestSubmit === "function") el.requestSubmit();
-    else el.submit();
+    el.requestSubmit();
     return true;
   }
-  const form = (el as HTMLElement).closest("form");
+  const form = el.closest("form");
   if (form) {
-    if (typeof form.requestSubmit === "function") form.requestSubmit();
-    else form.submit();
+    form.requestSubmit();
     return true;
   }
   (el as HTMLElement).click();

@@ -527,13 +527,13 @@ test("15. Credentials do not appear in logs / sanitization", async () => {
   }
 });
 
-test("OCR / image Match-To steps are rejected (WordPress-first DOM only)", () => {
+test("OCR / image Match-To without CSS → ORC_RUNTIME_UNAVAILABLE (not silent reject)", () => {
   const msg = describeUnsupportedStep({
     id: "s1",
     action: "CLICK_TARGET",
-    target: { matchTo: "middle", ocr: { confirmed: true } },
+    target: { matchTo: "middle", ocr: { confirmed: true }, asset: "roi.png", roi: { x: 0, y: 0, width: 1, height: 1 } },
   });
-  assert.ok(msg && /OCR|Match-To/i.test(msg));
+  assert.ok(msg && /ORC_RUNTIME_UNAVAILABLE/i.test(msg));
 });
 
 test("Script Creator target.css / target.selector is accepted; unsupported action fails closed", () => {

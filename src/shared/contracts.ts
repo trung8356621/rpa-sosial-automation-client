@@ -76,7 +76,12 @@ export interface AccountBinding {
 export interface SessionSignal {
   status: "present" | "absent" | "unsupported" | "error" | "unknown";
   checkedAt: string | null;
-  method: "facebook_c_user_cookie" | "wordpress_auth_cookie" | "site_cookie_presence" | null;
+  method:
+    | "facebook_c_user_cookie"
+    | "wordpress_auth_cookie"
+    | "wordpress_admin_dom"
+    | "site_cookie_presence"
+    | null;
   error?: string | null;
 }
 

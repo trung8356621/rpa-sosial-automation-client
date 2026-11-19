@@ -1,9 +1,17 @@
-import { WebContentsView, session, type BrowserWindow } from "electron";
+import { WebContentsView, session, type BrowserWindow, type WebContents } from "electron";
 import type { BrowserProfile, BrowserViewState, SessionSignal } from "../../shared/contracts.js";
 import type { ProfileManager } from "./profile-manager.js";
 import type { BrowserSyncService } from "./browser-sync-service.js";
 import { resolveInitialUrl } from "./url-resolver.js";
-import { evaluateSessionCookies, resolveSessionStrategy } from "./session-signal-strategy.js";
+import {
+  cookieBelongsToHost,
+  evaluateSessionCookies,
+  evaluateWordPressSession,
+  isWordPressAuthCookieName,
+  resolveBrowserOpenUrl,
+  resolveSessionStrategy,
+  type WordPressDomEvidence,
+} from "./session-signal-strategy.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
 import type { BrowserOpenOrchestrator } from "../auth/browser-open-orchestrator.js";
 import type { AuthContextFinder } from "../auth/auth-context-finder.js";
@@ -31,6 +39,7 @@ export class EmbeddedBrowser {
   private clipboardIsolation: BrowserClipboardIsolationHandle | null = null;
   private readonly interactionLock: BrowserInteractionLock;
   private authAbort: AbortController | null = null;
+  private jobAbortHandler: (() => void) | null = null;
   private humanResumeWait: {
     resolve: () => void;
     reject: (err: Error) => void;
@@ -112,6 +121,7 @@ export class EmbeddedBrowser {
 
   stopAutomation(): void {
     this.authAbort?.abort();
+    this.jobAbortHandler?.();
     this.interactionLock.requestStopFromUi();
     if (this.humanResumeWait) {
       this.humanResumeWait.reject(new Error("AUTH_CANCELLED"));
@@ -119,6 +129,27 @@ export class EmbeddedBrowser {
     }
     void this.interactionLock.release("user_stop");
     this.notify();
+  }
+
+  /** Campaign Job / Action Script overlay lock (same native overlay as Auth). */
+  async lockForAutomation(params: {
+    message?: string;
+    reason?: string;
+    onStop?: () => void;
+  }): Promise<void> {
+    this.jobAbortHandler = params.onStop ?? null;
+    await this.interactionLock.lock({
+      message: params.message,
+      reason: params.reason,
+      onStop: () => {
+        this.jobAbortHandler?.();
+      },
+    });
+  }
+
+  async releaseAutomationLock(reason = "complete"): Promise<void> {
+    this.jobAbortHandler = null;
+    await this.interactionLock.release(reason);
   }
 
   resumeAutomationAfterHuman(): void {
@@ -135,6 +166,32 @@ export class EmbeddedBrowser {
       this.view.setBounds(bounds);
     }
     this.interactionLock.setBounds(bounds);
+  }
+
+  getBounds(): { x: number; y: number; width: number; height: number } {
+    return { ...this.bounds };
+  }
+
+  /** Temporarily size the browser view for Creator Visual ORC (restore via restoreAuthViewport). */
+  private boundsBeforeAuth: { x: number; y: number; width: number; height: number } | null = null;
+
+  applyAuthViewport(size: { width: number; height: number }): void {
+    if (!this.boundsBeforeAuth) {
+      this.boundsBeforeAuth = { ...this.bounds };
+    }
+    this.setBounds({
+      x: this.bounds.x,
+      y: this.bounds.y,
+      width: size.width,
+      height: size.height,
+    });
+  }
+
+  restoreAuthViewport(): void {
+    if (this.boundsBeforeAuth) {
+      this.setBounds(this.boundsBeforeAuth);
+      this.boundsBeforeAuth = null;
+    }
   }
 
   setVisible(visible: boolean): void {
@@ -172,10 +229,12 @@ export class EmbeddedBrowser {
     }
 
     if (this.view && this.activeBrowserId === browserId) {
-      // Already running: do not reload or recreate WebContentsView
-      if (initialUrl && initialUrl !== this.currentUrl) {
-        await this.navigate(initialUrl);
-      }
+      // Already running: do not reload or recreate WebContentsView / partition.
+      logClientEvent("Browser already open — reuse partition", {
+        browserId,
+        partition: profile.partition,
+        currentUrl: this.currentUrl || null,
+      });
       this.setVisible(true);
       // Re-run Auth+Checkpoint: explicit Tag or Account auth/context discovery.
       await this.runAuthPipeline(browserId, profile, tag);
@@ -268,11 +327,21 @@ export class EmbeddedBrowser {
     view.setBounds(this.bounds);
     this.setVisible(true);
 
-    // Initial navigation: automatically determine website URL from platform and site_url
-    let targetUrl = initialUrl || profile.lastUrl;
-    if (!targetUrl) {
-      targetUrl = resolveInitialUrl(profile.platform, profile.accountBinding?.siteUrl);
-    }
+    // Initial navigation: avoid reopening wp-login?reauth= which can clear a valid session.
+    const targetUrl = resolveBrowserOpenUrl({
+      initialUrl,
+      lastUrl: profile.lastUrl,
+      siteUrl: profile.accountBinding?.siteUrl,
+      platform: profile.platform,
+      fallback: resolveInitialUrl,
+    });
+
+    logClientEvent("Browser open navigation target", {
+      browserId,
+      partition: profile.partition,
+      targetUrl,
+      lastUrl: profile.lastUrl ?? null,
+    });
 
     await this.navigate(targetUrl).catch((err) => {
       logClientError("Initial browser navigation failed", err);
@@ -293,7 +362,8 @@ export class EmbeddedBrowser {
     const accountId = profile.accountBinding?.accountId;
     if (!accountId) return;
 
-    const runCheckpoint = () => this.checkSessionSignal(browserId);
+    const runCheckpoint = (opts?: { settle?: boolean }) =>
+      this.checkSessionSignal(browserId, { settle: opts?.settle !== false });
 
     if (!this.authOrchestrator) {
       // Compatibility: no orchestrator wired → existing Checkpoint only.
@@ -420,12 +490,17 @@ export class EmbeddedBrowser {
         result.code === "AUTH_TIMEOUT" ||
         result.code === "AUTH_INTEGRITY_FAILED" ||
         result.code === "AUTH_DOWNLOAD_FAILED" ||
+        result.code === "ORC_RUNTIME_UNAVAILABLE" ||
+        result.code === "ASSET_DOWNLOAD_UNAVAILABLE" ||
+        result.code === "ASSET_INTEGRITY_FAILED" ||
+        result.code === "VIEWPORT_MISMATCH" ||
         result.code === "NO_ACCOUNT_TAG_ENTITLEMENT" ||
         result.code === "CLIENT_LEASE_INVALID" ||
         result.code === "AUTH_CONTEXT_AMBIGUOUS" ||
         result.code === "AUTH_CONTEXT_UNAVAILABLE" ||
         result.code === "AUTH_CANCELLED" ||
         result.code === "CHECKPOINT_FAILED" ||
+        result.code === "SESSION_UNKNOWN" ||
         result.code === "HUMAN_REQUIRED"
       ) {
         this.lastError = result.message;
@@ -641,12 +716,14 @@ export class EmbeddedBrowser {
   }
 
   /**
-   * Detect a site-specific authentication cookie in the profile's persistent partition.
-   * Strict security rule: Only checks presence (true/false).
-   * NEVER saves, logs, displays, or transmits cookie value.
-   * Requirement 5: Do NOT assign session signal of unrelated website to current account.
+   * Detect authentication for the profile's persistent partition.
+   * Strict security: only presence / DOM evidence — NEVER log cookie values.
+   * WordPress POC: auth cookies OR (/wp-admin/ URL + #wpadminbar / admin DOM).
    */
-  async checkSessionSignal(browserId?: string): Promise<SessionSignal> {
+  async checkSessionSignal(
+    browserId?: string,
+    opts?: { settle?: boolean; settleMs?: number }
+  ): Promise<SessionSignal> {
     const targetId = browserId || this.activeBrowserId;
     if (!targetId) {
       return { status: "unknown", checkedAt: null, method: null };
@@ -657,34 +734,125 @@ export class EmbeddedBrowser {
       return { status: "unknown", checkedAt: null, method: null };
     }
 
+    const wc =
+      this.activeBrowserId === targetId && this.view && !this.view.webContents.isDestroyed()
+        ? this.view.webContents
+        : null;
+
     const targetUrl =
-      this.activeBrowserId === targetId && this.currentUrl
-        ? this.currentUrl
-        : profile.lastUrl || profile.accountBinding?.siteUrl || "";
+      (wc ? this.currentUrl : "") ||
+      profile.lastUrl ||
+      profile.accountBinding?.siteUrl ||
+      "";
     if (!targetUrl) {
-      const unsupported: SessionSignal = { status: "unsupported", checkedAt: new Date().toISOString(), method: null };
+      const unsupported: SessionSignal = {
+        status: "unsupported",
+        checkedAt: new Date().toISOString(),
+        method: null,
+      };
       await this.profileManager.updateSessionSignal(targetId, unsupported);
       return unsupported;
     }
 
     try {
-      const parsed = new URL(targetUrl);
-      const strategy = resolveSessionStrategy(parsed.href, profile.accountBinding?.siteUrl);
-      const profileSession = session.fromPartition(profile.partition);
-      const cookies = strategy === "facebook"
-        ? await profileSession.cookies.get({ url: parsed.origin, name: "c_user" })
-        : strategy === "wordpress"
-          ? await profileSession.cookies.get({ url: parsed.href })
-          : [];
-      const signal = evaluateSessionCookies(strategy, cookies, new Date().toISOString());
+      const settle = opts?.settle === true;
+      const settleMs = opts?.settleMs ?? (settle ? 12_000 : 0);
+      const deadline = Date.now() + settleMs;
+      let signal: SessionSignal = {
+        status: "unknown",
+        checkedAt: new Date().toISOString(),
+        method: null,
+      };
 
-      logClientEvent("Checked session signal for profile", {
-        browserId: targetId,
-        status: signal.status,
-        method: signal.method,
-        partition: profile.partition,
-        origin: parsed.origin,
-      });
+      do {
+        if (wc) {
+          await this.waitForNavigationIdle(wc, 2_500);
+        }
+
+        const pageUrl = (wc ? this.currentUrl : "") || targetUrl;
+        const parsed = new URL(pageUrl);
+        const strategy = resolveSessionStrategy(parsed.href, profile.accountBinding?.siteUrl);
+        const profileSession = session.fromPartition(profile.partition);
+
+        // Persist in-memory Set-Cookie before reading partition (same partition as WC).
+        if (wc && wc.session === profileSession) {
+          try {
+            await profileSession.cookies.flushStore();
+          } catch {
+            /* non-fatal */
+          }
+        }
+
+        if (strategy === "facebook") {
+          const cookies = await profileSession.cookies.get({
+            url: parsed.origin,
+            name: "c_user",
+          });
+          signal = evaluateSessionCookies(strategy, cookies, new Date().toISOString());
+          logClientEvent("Checked session signal for profile", {
+            browserId: targetId,
+            status: signal.status,
+            method: signal.method,
+            partition: profile.partition,
+            origin: parsed.origin,
+            pagePath: parsed.pathname,
+            cookieNames: cookies.map((c) => c.name),
+            settle,
+          });
+        } else if (strategy === "wordpress") {
+          const originCookies = await profileSession.cookies.get({
+            url: `${parsed.origin}/`,
+          });
+          const allCookies = await profileSession.cookies.get({});
+          const hostCookies = allCookies.filter((c) =>
+            cookieBelongsToHost(c.domain, parsed.hostname)
+          );
+          const merged = new Map<string, { name: string; domain?: string }>();
+          for (const c of [...originCookies, ...hostCookies]) {
+            merged.set(c.name, { name: c.name, domain: c.domain });
+          }
+          const cookies = [...merged.values()];
+          const authCookieNames = cookies
+            .filter((c) => isWordPressAuthCookieName(c.name))
+            .map((c) => c.name);
+          const dom = wc ? await this.probeWordPressDom(wc) : null;
+          signal = evaluateWordPressSession({
+            cookies,
+            pageUrl,
+            dom,
+            checkedAt: new Date().toISOString(),
+          });
+          logClientEvent("Checked session signal for profile", {
+            browserId: targetId,
+            status: signal.status,
+            method: signal.method,
+            partition: profile.partition,
+            origin: parsed.origin,
+            pagePath: parsed.pathname,
+            cookieNames: authCookieNames,
+            cookieCountForHost: cookies.length,
+            dom,
+            settle,
+          });
+        } else {
+          signal = evaluateSessionCookies(strategy, [], new Date().toISOString());
+          logClientEvent("Checked session signal for profile", {
+            browserId: targetId,
+            status: signal.status,
+            method: signal.method,
+            partition: profile.partition,
+            origin: parsed.origin,
+            pagePath: parsed.pathname,
+            settle,
+          });
+        }
+
+        if (signal.status === "present" || !settle || Date.now() >= deadline) {
+          break;
+        }
+        await sleepMs(250);
+      } while (Date.now() < deadline);
+
       await this.profileManager.updateSessionSignal(targetId, signal);
       await this.syncService.syncAll();
       return signal;
@@ -698,6 +866,46 @@ export class EmbeddedBrowser {
       };
       await this.profileManager.updateSessionSignal(targetId, failure);
       return failure;
+    }
+  }
+
+  private async waitForNavigationIdle(wc: WebContents, timeoutMs: number): Promise<void> {
+    const started = Date.now();
+    while (typeof wc.isLoading === "function" && wc.isLoading()) {
+      if (Date.now() - started > timeoutMs) break;
+      await sleepMs(100);
+    }
+    // One frame after load — login redirects often settle here.
+    try {
+      await wc.executeJavaScript(
+        "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))",
+        true
+      );
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private async probeWordPressDom(wc: WebContents): Promise<WordPressDomEvidence> {
+    try {
+      const dom = (await wc.executeJavaScript(
+        `(() => {
+          const body = document.body;
+          return {
+            hasAdminBar: Boolean(document.querySelector("#wpadminbar")),
+            hasWpBody: Boolean(document.querySelector("#wpbody")),
+            bodyHasWpAdmin: Boolean(body && body.classList && body.classList.contains("wp-admin")),
+          };
+        })()`,
+        true
+      )) as WordPressDomEvidence;
+      return {
+        hasAdminBar: Boolean(dom?.hasAdminBar),
+        hasWpBody: Boolean(dom?.hasWpBody),
+        bodyHasWpAdmin: Boolean(dom?.bodyHasWpAdmin),
+      };
+    } catch {
+      return { hasAdminBar: false, hasWpBody: false, bodyHasWpAdmin: false };
     }
   }
 
@@ -718,4 +926,8 @@ export class EmbeddedBrowser {
   reload(): void {
     this.view?.webContents.reload();
   }
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
