@@ -8,11 +8,17 @@ export type AuthPipelineCode =
   | "NO_AUTH_CONFIGURED"
   | "NO_ACCOUNT_TAG_ENTITLEMENT"
   | "CLIENT_LEASE_INVALID"
+  | "AUTH_CONTEXT_UNAVAILABLE"
+  | "AUTH_CONTEXT_AMBIGUOUS"
   | "AUTH_RELEASE_UNAVAILABLE"
   | "AUTH_DOWNLOAD_FAILED"
   | "AUTH_INTEGRITY_FAILED"
   | "AUTH_EXECUTION_FAILED"
   | "AUTH_TIMEOUT"
+  | "AUTH_RETRY_FORBIDDEN"
+  | "AUTH_CANCELLED"
+  | "HUMAN_REQUIRED"
+  | "SESSION_VALID"
   | "CHECKPOINT_FAILED"
   | "CHECKPOINT_PASSED"
   | "UNKNOWN";
@@ -40,6 +46,8 @@ export interface AuthPipelineResult {
   actionTagKey?: string;
   /** Server/error code when mapped from HTTP. */
   serverError?: string;
+  /** Auth Script executions in this Browser Open (hard cap 1). */
+  authRuns?: number;
 }
 
 export function isAuthorizationFailure(code: AuthPipelineCode): boolean {
@@ -66,6 +74,18 @@ export function mapServerErrorToCode(serverError: string | undefined, status?: n
   }
   if (err === "auth_pin_missing" || err === "auth_pin_target_missing") {
     return "NO_AUTH_CONFIGURED";
+  }
+  if (
+    err === "auth_context_ambiguous" ||
+    err === "AUTH_CONTEXT_AMBIGUOUS"
+  ) {
+    return "AUTH_CONTEXT_AMBIGUOUS";
+  }
+  if (
+    err === "auth_context_unavailable" ||
+    err === "auth_context_schema_unavailable"
+  ) {
+    return "AUTH_CONTEXT_UNAVAILABLE";
   }
   if (
     err === "auth_release_not_found" ||

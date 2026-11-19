@@ -20,6 +20,7 @@ import { AuthScriptResolver } from "./auth/auth-script-resolver.js";
 import { AuthScriptLoader } from "./auth/auth-script-loader.js";
 import { AuthScriptRunner } from "./auth/auth-script-runner.js";
 import { BrowserOpenOrchestrator } from "./auth/browser-open-orchestrator.js";
+import { AuthContextFinder } from "./auth/auth-context-finder.js";
 import type { ClientCommand, BrowserStateSnapshot, ClientNotification } from "../shared/contracts.js";
 import { APP_USER_MODEL_ID } from "../shared/windows-notification.js";
 import { sharedBrowserVirtualClipboard } from "./browser/browser-virtual-clipboard.js";
@@ -168,6 +169,9 @@ function getBrowserStateSnapshot(): BrowserStateSnapshot {
           canGoBack: false,
           canGoForward: false,
           visible: false,
+          lastAuthCode: null,
+          lastAuthMessage: null,
+          automationLock: { mode: "off", message: null, reason: null },
         },
   };
 }
@@ -251,6 +255,7 @@ async function bootstrap() {
 
   syncService = new BrowserSyncService(connection, profileManager, broadcastBrowserState);
   embeddedBrowser = new EmbeddedBrowser(mainWindow, profileManager, syncService);
+  embeddedBrowser.setAuthContextFinder(new AuthContextFinder(connection));
   embeddedBrowser.setAuthOrchestrator(
     new BrowserOpenOrchestrator({
       resolver: new AuthScriptResolver(connection),
@@ -460,6 +465,16 @@ async function bootstrap() {
         const signal = await embeddedBrowser!.checkSessionSignal(cmd.browserId);
         broadcastBrowserState();
         return signal;
+      }
+      case "stopAutomation": {
+        embeddedBrowser!.stopAutomation();
+        broadcastBrowserState();
+        return getBrowserStateSnapshot();
+      }
+      case "resumeAutomationAfterHuman": {
+        embeddedBrowser!.resumeAutomationAfterHuman();
+        broadcastBrowserState();
+        return getBrowserStateSnapshot();
       }
       default:
         throw new Error(`Unknown command type: ${(cmd as { type: string }).type}`);

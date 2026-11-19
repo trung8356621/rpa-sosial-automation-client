@@ -14,6 +14,7 @@ export type AuthRunnerLike = Pick<AuthScriptRunner, "run"> | {
     release: AuthReleasePulled;
     account: AccountCredentialSource;
     timeoutMs?: number;
+    signal?: AbortSignal;
   }) => Promise<AuthRunOutcome>;
 };
 
@@ -24,8 +25,17 @@ export type BrowserOpenAuthDeps = {
 };
 
 /**
- * Auth Script before existing Checkpoint (session signal).
- * Browser Open WITHOUT Action Tag context skips Auth entirely.
+ * Authentication Script is optional secondary automation (WordPress POC).
+ *
+ * Per-execution policy (Master Context 19/11/2026):
+ * 1. Checkpoint/session first.
+ * 2. Session present → skip Auth (0 runs).
+ * 3. Session absent → Auth at most once, then Checkpoint again.
+ * 4. Auth fail OR post-Auth Checkpoint fail → stop; never Auth twice in same execution.
+ * 5. No Auth pin / no Tag context → manual login path (still Checkpoint once).
+ *
+ * Tag context may come from explicit IPC or AuthContextFinder (Profile Open).
+ * Same WebContents / partition — never a temp browser.
  */
 export class BrowserOpenOrchestrator {
   private readonly inFlight = new Map<string, Promise<AuthPipelineResult>>();
@@ -40,6 +50,7 @@ export class BrowserOpenOrchestrator {
     webContents: WebContents | null | undefined;
     account: AccountCredentialSource;
     runCheckpoint: () => Promise<SessionSignal>;
+    signal?: AbortSignal;
   }): Promise<AuthPipelineResult> {
     const existing = this.inFlight.get(params.browserId);
     if (existing) {
@@ -69,64 +80,148 @@ export class BrowserOpenOrchestrator {
     webContents: WebContents | null | undefined;
     account: AccountCredentialSource;
     runCheckpoint: () => Promise<SessionSignal>;
+    signal?: AbortSignal;
   }): Promise<AuthPipelineResult> {
-    const { browserId, accountId, partition, tag, webContents, account, runCheckpoint } = params;
+    const { browserId, accountId, partition, tag, webContents, account, runCheckpoint, signal } =
+      params;
+
+    /** Hard cap: at most one Auth Script run for this Browser Open execution. */
+    let authRuns = 0;
 
     if (!hasExplicitTagContext(tag)) {
-      const signal = await runCheckpoint();
-      return checkpointResult("NO_TAG_CONTEXT", "skipped", signal, {
+      const signalCp = await runCheckpoint();
+      logClientEvent("AUTH_SKIPPED", {
+        reason: "NO_TAG_CONTEXT",
+        browserId,
+        accountId,
+      });
+      return checkpointResult("NO_TAG_CONTEXT", "skipped", signalCp, {
         message: "Không có Action Tag context — bỏ qua Auth Script (manual login).",
+        authRuns,
       });
     }
 
-    logClientEvent("Auth pipeline resolve", {
+    if (signal?.aborted) {
+      const signalCp = await runCheckpoint();
+      return checkpointResult("AUTH_CANCELLED", "skipped", signalCp, {
+        message: "Auth bị hủy trước khi chạy.",
+        actionTagId: tag?.actionTagId,
+        actionTagKey: tag?.actionTagKey,
+        authRuns: 0,
+      });
+    }
+
+    // 1) Session / Checkpoint first — never Auth when already logged in.
+    const initial = await runCheckpoint();
+    logClientEvent("SESSION_CHECK", {
+      browserId,
+      accountId,
+      partition,
+      status: initial.status,
+      method: initial.method,
+      actionTagId: tag?.actionTagId,
+      actionTagKey: tag?.actionTagKey,
+    });
+
+    if (initial.status === "present") {
+      logClientEvent("AUTH_SKIPPED", {
+        reason: "SESSION_VALID",
+        browserId,
+        accountId,
+        actionTagId: tag?.actionTagId,
+        actionTagKey: tag?.actionTagKey,
+      });
+      return {
+        code: "SESSION_VALID",
+        phase: "skipped",
+        authExecutionOk: false,
+        checkpointStatus: "present",
+        message: "Session/Checkpoint hợp lệ — bỏ qua Authentication Script (0 lần).",
+        actionTagId: tag?.actionTagId,
+        actionTagKey: tag?.actionTagKey,
+        authRuns: 0,
+      };
+    }
+
+    logClientEvent("AUTH_RESOLVE", {
       browserId,
       accountId,
       partition,
       actionTagId: tag?.actionTagId,
       actionTagKey: tag?.actionTagKey,
+      initialCheckpoint: initial.status,
     });
 
     const resolved = await this.deps.resolver.resolve(accountId, tag!);
     if (resolved.kind === "no_tag_context") {
-      const signal = await runCheckpoint();
-      return checkpointResult("NO_TAG_CONTEXT", "skipped", signal, {
+      logClientEvent("AUTH_SKIPPED", { reason: "NO_TAG_CONTEXT", browserId, accountId });
+      return checkpointResult("NO_TAG_CONTEXT", "skipped", initial, {
         message: "Không có Action Tag context — bỏ qua Auth Script.",
+        authRuns,
       });
     }
     if (resolved.kind === "no_auth_configured") {
-      const signal = await runCheckpoint();
-      return checkpointResult("NO_AUTH_CONFIGURED", "resolve", signal, {
+      logClientEvent("AUTH_SKIPPED", {
+        reason: "NO_AUTH_CONFIGURED",
+        browserId,
+        accountId,
+        actionTagId: tag?.actionTagId,
+        actionTagKey: tag?.actionTagKey,
+      });
+      return checkpointResult("NO_AUTH_CONFIGURED", "resolve", initial, {
         message: "Action Tag chưa gắn Auth pin — manual login.",
         actionTagId: tag?.actionTagId,
         actionTagKey: tag?.actionTagKey,
         serverError: resolved.serverError,
+        authRuns,
       });
     }
     if (resolved.kind === "error") {
-      // Keep browser open; still run Checkpoint (manual login remains).
-      const signal = await runCheckpoint();
+      logClientEvent("AUTH_FAILED", {
+        phase: "resolve",
+        code: resolved.code,
+        browserId,
+        accountId,
+        serverError: resolved.serverError,
+      });
       return {
         code: resolved.code,
         phase: "resolve",
         authExecutionOk: false,
-        checkpointStatus: signal.status,
+        checkpointStatus: initial.status,
         message: resolved.message,
         serverError: resolved.serverError,
         actionTagId: tag?.actionTagId,
         actionTagKey: tag?.actionTagKey,
+        authRuns,
       };
     }
 
     const expected = resolved.release;
+    logClientEvent("AUTH_PULL", {
+      browserId,
+      accountId,
+      packageKey: expected.package_key,
+      releaseId: expected.release_id,
+      version: expected.version,
+      actionTagId: expected.action_tag_id,
+      actionTagKey: expected.action_tag_key,
+    });
+
     const loaded = await this.deps.loader.pullExact(accountId, tag!, expected);
     if (loaded.kind === "error") {
-      const signal = await runCheckpoint();
+      logClientEvent("AUTH_FAILED", {
+        phase: "pull",
+        code: loaded.code,
+        browserId,
+        packageKey: expected.package_key,
+        releaseId: expected.release_id,
+      });
       return {
         code: loaded.code,
         phase: "pull",
         authExecutionOk: false,
-        checkpointStatus: signal.status,
+        checkpointStatus: initial.status,
         message: loaded.message,
         serverError: loaded.serverError,
         packageKey: expected.package_key,
@@ -135,39 +230,143 @@ export class BrowserOpenOrchestrator {
         contentDigest: expected.content_digest,
         actionTagId: expected.action_tag_id,
         actionTagKey: expected.action_tag_key,
+        authRuns,
       };
     }
 
     if (!webContents || webContents.isDestroyed()) {
-      const signal = await runCheckpoint();
+      logClientEvent("AUTH_FAILED", {
+        phase: "execute",
+        code: "AUTH_EXECUTION_FAILED",
+        reason: "webcontents_unavailable",
+        browserId,
+      });
       return {
         code: "AUTH_EXECUTION_FAILED",
         phase: "execute",
         authExecutionOk: false,
-        checkpointStatus: signal.status,
+        checkpointStatus: initial.status,
         message: "WebContents không sẵn sàng — không thể chạy Auth trong partition.",
         packageKey: expected.package_key,
         releaseId: expected.release_id,
         version: expected.version,
         contentDigest: expected.content_digest,
+        authRuns,
       };
     }
+
+    if (signal?.aborted) {
+      return {
+        code: "AUTH_CANCELLED",
+        phase: "execute",
+        authExecutionOk: false,
+        checkpointStatus: initial.status,
+        message: "Auth bị hủy trước khi execute.",
+        packageKey: expected.package_key,
+        releaseId: expected.release_id,
+        version: expected.version,
+        actionTagId: expected.action_tag_id,
+        actionTagKey: expected.action_tag_key,
+        authRuns: 0,
+      };
+    }
+
+    // 2) Exactly one Auth attempt for this execution.
+    if (authRuns >= 1) {
+      return {
+        code: "AUTH_RETRY_FORBIDDEN",
+        phase: "execute",
+        authExecutionOk: false,
+        checkpointStatus: initial.status,
+        message:
+          "Authentication Script đã chạy trong execution này — không chạy lần hai.",
+        packageKey: expected.package_key,
+        releaseId: expected.release_id,
+        version: expected.version,
+        contentDigest: expected.content_digest,
+        actionTagId: expected.action_tag_id,
+        actionTagKey: expected.action_tag_key,
+        authRuns,
+      };
+    }
+
+    authRuns = 1;
+    logClientEvent("AUTH_EXECUTION_STARTED", {
+      browserId,
+      packageKey: expected.package_key,
+      releaseId: expected.release_id,
+      version: expected.version,
+      actionTagId: expected.action_tag_id,
+      actionTagKey: expected.action_tag_key,
+    });
 
     const run = await this.deps.runner.run({
       webContents,
       release: loaded.release,
       account,
+      signal,
     });
 
-    // Checkpoint ALWAYS runs after Auth attempt — Auth OK ≠ login success.
-    const signal = await runCheckpoint();
+    if (run.kind === "cancelled") {
+      const afterFail = await runCheckpoint();
+      logClientEvent("AUTH_FAILED", {
+        phase: "execute",
+        code: "AUTH_CANCELLED",
+        browserId,
+        stepsExecuted: run.stepsExecuted,
+      });
+      return {
+        code: "AUTH_CANCELLED",
+        phase: "execute",
+        authExecutionOk: false,
+        checkpointStatus: afterFail.status,
+        message: run.message,
+        packageKey: expected.package_key,
+        releaseId: expected.release_id,
+        version: expected.version,
+        contentDigest: expected.content_digest,
+        actionTagId: expected.action_tag_id,
+        actionTagKey: expected.action_tag_key,
+        authRuns,
+      };
+    }
+
+    if (run.kind === "human_required") {
+      logClientEvent("AUTH_FAILED", {
+        phase: "execute",
+        code: "HUMAN_REQUIRED",
+        browserId,
+        stepsExecuted: run.stepsExecuted,
+      });
+      return {
+        code: "HUMAN_REQUIRED",
+        phase: "execute",
+        authExecutionOk: false,
+        checkpointStatus: initial.status,
+        message: run.message,
+        packageKey: expected.package_key,
+        releaseId: expected.release_id,
+        version: expected.version,
+        contentDigest: expected.content_digest,
+        actionTagId: expected.action_tag_id,
+        actionTagKey: expected.action_tag_key,
+        authRuns,
+      };
+    }
 
     if (run.kind === "timeout") {
+      const afterFail = await runCheckpoint();
+      logClientEvent("AUTH_FAILED", {
+        phase: "execute",
+        code: "AUTH_TIMEOUT",
+        browserId,
+        stepsExecuted: run.stepsExecuted,
+      });
       return {
         code: "AUTH_TIMEOUT",
         phase: "execute",
         authExecutionOk: false,
-        checkpointStatus: signal.status,
+        checkpointStatus: afterFail.status,
         message: run.message,
         packageKey: expected.package_key,
         releaseId: expected.release_id,
@@ -175,15 +374,23 @@ export class BrowserOpenOrchestrator {
         contentDigest: expected.content_digest,
         actionTagId: expected.action_tag_id,
         actionTagKey: expected.action_tag_key,
+        authRuns,
       };
     }
 
     if (run.kind === "error") {
+      const afterFail = await runCheckpoint();
+      logClientEvent("AUTH_FAILED", {
+        phase: "execute",
+        code: "AUTH_EXECUTION_FAILED",
+        browserId,
+        stepsExecuted: run.stepsExecuted,
+      });
       return {
         code: "AUTH_EXECUTION_FAILED",
         phase: "execute",
         authExecutionOk: false,
-        checkpointStatus: signal.status,
+        checkpointStatus: afterFail.status,
         message: run.message,
         packageKey: expected.package_key,
         releaseId: expected.release_id,
@@ -191,10 +398,30 @@ export class BrowserOpenOrchestrator {
         contentDigest: expected.content_digest,
         actionTagId: expected.action_tag_id,
         actionTagKey: expected.action_tag_key,
+        authRuns,
       };
     }
 
-    if (signal.status === "present") {
+    // 3) Auth steps finished ≠ login success — Checkpoint is authoritative.
+    const cp = await runCheckpoint();
+    logClientEvent("SESSION_CHECK", {
+      browserId,
+      accountId,
+      phase: "post_auth",
+      status: cp.status,
+      method: cp.method,
+    });
+
+    if (cp.status === "present") {
+      logClientEvent("AUTH_CHECKPOINT_PASSED", {
+        browserId,
+        packageKey: expected.package_key,
+        releaseId: expected.release_id,
+        version: expected.version,
+        actionTagId: expected.action_tag_id,
+        actionTagKey: expected.action_tag_key,
+        authRuns,
+      });
       return {
         code: "CHECKPOINT_PASSED",
         phase: "checkpoint",
@@ -207,35 +434,31 @@ export class BrowserOpenOrchestrator {
         contentDigest: expected.content_digest,
         actionTagId: expected.action_tag_id,
         actionTagKey: expected.action_tag_key,
+        authRuns,
       };
     }
 
-    if (signal.status === "absent" || signal.status === "unsupported" || signal.status === "error") {
-      return {
-        code: "CHECKPOINT_FAILED",
-        phase: "checkpoint",
-        authExecutionOk: true,
-        checkpointStatus: signal.status,
-        message: "Auth Script chạy xong nhưng Checkpoint chưa xác nhận login.",
-        packageKey: expected.package_key,
-        releaseId: expected.release_id,
-        version: expected.version,
-        contentDigest: expected.content_digest,
-        actionTagId: expected.action_tag_id,
-        actionTagKey: expected.action_tag_key,
-      };
-    }
-
+    logClientEvent("AUTH_FAILED", {
+      phase: "checkpoint",
+      code: "CHECKPOINT_FAILED",
+      browserId,
+      checkpointStatus: cp.status,
+      authRuns,
+    });
     return {
-      code: "UNKNOWN",
+      code: "CHECKPOINT_FAILED",
       phase: "checkpoint",
       authExecutionOk: true,
-      checkpointStatus: signal.status,
-      message: "Kết quả Checkpoint không chắc chắn.",
+      checkpointStatus: cp.status,
+      message:
+        "Auth Script đã chạy 1 lần nhưng Checkpoint chưa xác nhận login — dừng, không retry Auth.",
       packageKey: expected.package_key,
       releaseId: expected.release_id,
       version: expected.version,
       contentDigest: expected.content_digest,
+      actionTagId: expected.action_tag_id,
+      actionTagKey: expected.action_tag_key,
+      authRuns,
     };
   }
 }

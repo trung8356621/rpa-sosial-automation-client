@@ -104,6 +104,8 @@ export interface BrowserProfile {
   updatedAt: string;
 }
 
+export type AutomationLockMode = "off" | "locked" | "human";
+
 export interface BrowserViewState {
   activeBrowserId: string | null;
   currentUrl: string;
@@ -112,6 +114,14 @@ export interface BrowserViewState {
   canGoForward: boolean;
   visible: boolean;
   lastError?: string | null;
+  /** Last Auth pipeline result code (safe diagnostic; no secrets). */
+  lastAuthCode?: string | null;
+  lastAuthMessage?: string | null;
+  automationLock?: {
+    mode: AutomationLockMode;
+    message: string | null;
+    reason: string | null;
+  };
 }
 
 export interface BrowserStateSnapshot {
@@ -164,6 +174,8 @@ export type ClientCommand =
   | { type: "bindAccount"; browserId: string; accountId: string; accountName?: string; platform?: string; email?: string | null; siteUrl?: string | null }
   | { type: "unbindAccount"; browserId: string }
   | { type: "checkSessionSignal"; browserId: string }
+  | { type: "stopAutomation" }
+  | { type: "resumeAutomationAfterHuman" }
   | { type: "getNotifications" }
   | { type: "ackNotification"; notificationId: string }
   | { type: "getWindowsNotificationStatus" }

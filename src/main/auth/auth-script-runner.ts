@@ -10,6 +10,8 @@ import { logClientError, logClientEvent } from "../main-error-log.js";
 export type AuthRunOutcome =
   | { kind: "ok"; stepsExecuted: number }
   | { kind: "timeout"; message: string; stepsExecuted: number }
+  | { kind: "cancelled"; message: string; stepsExecuted: number }
+  | { kind: "human_required"; message: string; stepsExecuted: number }
   | { kind: "error"; message: string; stepsExecuted: number };
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -24,8 +26,9 @@ export class AuthScriptRunner {
     release: AuthReleasePulled;
     account: AccountCredentialSource;
     timeoutMs?: number;
+    signal?: AbortSignal;
   }): Promise<AuthRunOutcome> {
-    const { webContents, release, account } = params;
+    const { webContents, release, account, signal } = params;
     const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const manifest = release.manifest;
     const steps = Array.isArray(manifest.steps) ? (manifest.steps as AuthScriptStep[]) : [];
@@ -53,7 +56,7 @@ export class AuthScriptRunner {
       return { kind: "error", message: bindings.message, stepsExecuted: 0 };
     }
 
-    logClientEvent("Auth Script execution starting", {
+    logClientEvent("AUTH_EXECUTION_STARTED", {
       packageKey: release.package_key,
       version: release.version,
       releaseId: release.release_id,
@@ -67,6 +70,13 @@ export class AuthScriptRunner {
 
     try {
       for (let i = 0; i < steps.length; i++) {
+        if (signal?.aborted) {
+          return {
+            kind: "cancelled",
+            message: "Auth Script bị hủy bởi người dùng.",
+            stepsExecuted,
+          };
+        }
         if (Date.now() > deadline) {
           return {
             kind: "timeout",
@@ -77,10 +87,34 @@ export class AuthScriptRunner {
         const step = steps[i];
         await executeDomStep(webContents, step, bindings.values, deadline);
         stepsExecuted += 1;
+        logClientEvent("AUTH_STEP_COMPLETED", {
+          packageKey: release.package_key,
+          releaseId: release.release_id,
+          version: release.version,
+          stepIndex: i,
+          action: normalizeAction(step.action),
+          stepsExecuted,
+        });
+
+        const human = await detectHumanRequired(webContents);
+        if (human) {
+          return {
+            kind: "human_required",
+            message: human,
+            stepsExecuted,
+          };
+        }
       }
       return { kind: "ok", stepsExecuted };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (signal?.aborted || /aborted|cancelled/i.test(message)) {
+        return {
+          kind: "cancelled",
+          message: "Auth Script bị hủy bởi người dùng.",
+          stepsExecuted,
+        };
+      }
       logClientError("Auth Script execution failed", {
         packageKey: release.package_key,
         releaseId: release.release_id,
@@ -91,6 +125,35 @@ export class AuthScriptRunner {
       return { kind: "error", message, stepsExecuted };
     }
   }
+}
+
+/** Detect common CAPTCHA / verification gates — never bypass; unlock for human. */
+async function detectHumanRequired(webContents: WebContents): Promise<string | null> {
+  try {
+    const hit = await webContents.executeJavaScript(
+      `(() => {
+        const text = (document.body && document.body.innerText || '').toLowerCase();
+        const selectors = [
+          '#captcha', '.g-recaptcha', 'iframe[src*="recaptcha"]',
+          '#wp-auth-check', '.cf-challenge', '[data-callback*="captcha"]'
+        ];
+        for (const s of selectors) {
+          if (document.querySelector(s)) return 'captcha_or_verification_ui';
+        }
+        if (text.includes('captcha') || text.includes('verify you are human')) {
+          return 'captcha_or_verification_text';
+        }
+        return null;
+      })()`,
+      true
+    );
+    if (typeof hit === "string" && hit) {
+      return `HUMAN_REQUIRED: phát hiện xác minh/CAPTCHA (${hit}) — không bypass.`;
+    }
+  } catch {
+    // ignore detection failures
+  }
+  return null;
 }
 
 export function describeUnsupportedStep(step: AuthScriptStep): string | null {
@@ -145,8 +208,24 @@ function normalizeAction(action: unknown): string {
     .replace(/-/g, "_");
 }
 
-function resolveSelector(step: AuthScriptStep): string {
-  return String(step.selector || step.css || "").trim();
+/**
+ * Resolve CSS selector from flat step fields or Script Creator `target` object.
+ * Does not invent selectors; unsupported OCR/image targets are rejected earlier.
+ */
+export function resolveSelector(step: AuthScriptStep): string {
+  const direct = String(step.selector || step.css || "").trim();
+  if (direct) return direct;
+  const target = step.target;
+  if (target && typeof target === "object") {
+    const nested = String(
+      (target as { selector?: unknown; css?: unknown; query?: unknown }).selector ||
+        (target as { css?: unknown }).css ||
+        (target as { query?: unknown }).query ||
+        ""
+    ).trim();
+    if (nested) return nested;
+  }
+  return "";
 }
 
 async function executeDomStep(

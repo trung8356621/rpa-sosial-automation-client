@@ -392,6 +392,53 @@ export function BrowserWorkspacePanel({
         </div>
       )}
 
+      {viewState?.automationLock?.mode === "locked" && (
+        <div className="browser-error-banner" style={{ background: "#0f172a", color: "#e2e8f0" }}>
+          <span>{viewState.automationLock.message || "Automation đang chạy — Vui lòng không thao tác"}</span>
+          <button
+            type="button"
+            className="browser-btn"
+            style={{ padding: "2px 8px", fontSize: 11 }}
+            onClick={() => void window.client.invoke({ type: "stopAutomation" }).then(() => refreshState())}
+          >
+            Dừng automation
+          </button>
+        </div>
+      )}
+
+      {viewState?.automationLock?.mode === "human" && (
+        <div className="browser-error-banner" style={{ background: "#78350f", color: "#fffbeb" }}>
+          <span>{viewState.automationLock.message || "Cần xác minh thủ công — xử lý xong rồi tiếp tục"}</span>
+          <button
+            type="button"
+            className="browser-btn"
+            style={{ padding: "2px 8px", fontSize: 11 }}
+            onClick={() =>
+              void window.client.invoke({ type: "resumeAutomationAfterHuman" }).then(() => refreshState())
+            }
+          >
+            Tiếp tục automation
+          </button>
+          <button
+            type="button"
+            className="browser-btn"
+            style={{ padding: "2px 8px", fontSize: 11 }}
+            onClick={() => void window.client.invoke({ type: "stopAutomation" }).then(() => refreshState())}
+          >
+            Dừng
+          </button>
+        </div>
+      )}
+
+      {viewState?.lastAuthCode && viewState.lastAuthCode !== "CHECKPOINT_PASSED" && viewState.lastAuthCode !== "SESSION_VALID" && (
+        <div className="browser-error-banner" style={{ fontSize: 12 }}>
+          <span>
+            Auth: <code>{viewState.lastAuthCode}</code>
+            {viewState.lastAuthMessage ? ` — ${viewState.lastAuthMessage}` : ""}
+          </span>
+        </div>
+      )}
+
       {/* Page Load Failure Warning (if real error occurred) */}
       {viewState?.lastError && (
         <div className="browser-error-banner">

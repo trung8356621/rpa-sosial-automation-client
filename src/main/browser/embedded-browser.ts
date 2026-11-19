@@ -6,13 +6,15 @@ import { resolveInitialUrl } from "./url-resolver.js";
 import { evaluateSessionCookies, resolveSessionStrategy } from "./session-signal-strategy.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
 import type { BrowserOpenOrchestrator } from "../auth/browser-open-orchestrator.js";
-import type { AuthTagContext } from "../auth/auth-script-types.js";
+import type { AuthContextFinder } from "../auth/auth-context-finder.js";
+import { hasExplicitTagContext, type AuthTagContext } from "../auth/auth-script-types.js";
 import type { AuthPipelineResult } from "../auth/outcomes.js";
 import {
   attachBrowserClipboardIsolation,
   resolveBrowserClipboardPreloadPath,
   type BrowserClipboardIsolationHandle,
 } from "./browser-clipboard-isolation.js";
+import { BrowserInteractionLock } from "./browser-interaction-lock.js";
 
 export class EmbeddedBrowser {
   private view: WebContentsView | null = null;
@@ -24,14 +26,23 @@ export class EmbeddedBrowser {
   private bounds = { x: 260, y: 120, width: 680, height: 560 };
   private stateListeners = new Set<(state: BrowserViewState) => void>();
   private authOrchestrator: BrowserOpenOrchestrator | null = null;
+  private authContextFinder: AuthContextFinder | null = null;
   private lastAuthResult: AuthPipelineResult | null = null;
   private clipboardIsolation: BrowserClipboardIsolationHandle | null = null;
+  private readonly interactionLock: BrowserInteractionLock;
+  private authAbort: AbortController | null = null;
+  private humanResumeWait: {
+    resolve: () => void;
+    reject: (err: Error) => void;
+  } | null = null;
 
   constructor(
     private readonly window: BrowserWindow,
     private readonly profileManager: ProfileManager,
     private readonly syncService: BrowserSyncService
   ) {
+    this.interactionLock = new BrowserInteractionLock(window);
+    this.interactionLock.onStateChange(() => this.notify());
     // When account changes on a profile, reset partition storage to avoid cross-account session pollution
     this.profileManager.setSessionResetCallback(async (browserId, partition) => {
       if (this.activeBrowserId === browserId) {
@@ -60,6 +71,7 @@ export class EmbeddedBrowser {
 
   getViewState(): BrowserViewState {
     const wc = this.view?.webContents;
+    const lock = this.interactionLock.getState();
     return {
       activeBrowserId: this.activeBrowserId,
       currentUrl: this.currentUrl,
@@ -68,6 +80,13 @@ export class EmbeddedBrowser {
       canGoForward: Boolean(wc?.navigationHistory?.canGoForward ? wc.navigationHistory.canGoForward() : wc?.canGoForward()),
       visible: this.visible,
       lastError: this.lastError,
+      lastAuthCode: this.lastAuthResult?.code ?? null,
+      lastAuthMessage: this.lastAuthResult?.message ?? null,
+      automationLock: {
+        mode: lock.mode,
+        message: lock.message,
+        reason: lock.reason,
+      },
     };
   }
 
@@ -83,8 +102,31 @@ export class EmbeddedBrowser {
     this.authOrchestrator = orchestrator;
   }
 
+  setAuthContextFinder(finder: AuthContextFinder | null): void {
+    this.authContextFinder = finder;
+  }
+
   getLastAuthResult(): AuthPipelineResult | null {
     return this.lastAuthResult;
+  }
+
+  stopAutomation(): void {
+    this.authAbort?.abort();
+    this.interactionLock.requestStopFromUi();
+    if (this.humanResumeWait) {
+      this.humanResumeWait.reject(new Error("AUTH_CANCELLED"));
+      this.humanResumeWait = null;
+    }
+    void this.interactionLock.release("user_stop");
+    this.notify();
+  }
+
+  resumeAutomationAfterHuman(): void {
+    this.interactionLock.requestResumeFromUi();
+    if (this.humanResumeWait) {
+      this.humanResumeWait.resolve();
+      this.humanResumeWait = null;
+    }
   }
 
   setBounds(bounds: { x: number; y: number; width: number; height: number }): void {
@@ -92,6 +134,7 @@ export class EmbeddedBrowser {
     if (this.view) {
       this.view.setBounds(bounds);
     }
+    this.interactionLock.setBounds(bounds);
   }
 
   setVisible(visible: boolean): void {
@@ -134,10 +177,8 @@ export class EmbeddedBrowser {
         await this.navigate(initialUrl);
       }
       this.setVisible(true);
-      // Re-run Auth+Checkpoint only when explicit Tag context is provided (e.g. campaign open).
-      if (tag && (tag.actionTagId || tag.actionTagKey)) {
-        await this.runAuthPipeline(browserId, profile, tag);
-      }
+      // Re-run Auth+Checkpoint: explicit Tag or Account auth/context discovery.
+      await this.runAuthPipeline(browserId, profile, tag);
       return;
     }
 
@@ -260,7 +301,21 @@ export class EmbeddedBrowser {
       return;
     }
 
+    this.authAbort?.abort();
+    this.authAbort = new AbortController();
+    const signal = this.authAbort.signal;
+
     try {
+      let resolvedTag: AuthTagContext | null | undefined = tag;
+      if (!hasExplicitTagContext(resolvedTag)) {
+        resolvedTag = await this.resolveTagFromAccountContext(accountId);
+        if (resolvedTag === null) {
+          // Ambiguous / hard error already recorded — Checkpoint only.
+          await runCheckpoint();
+          return;
+        }
+      }
+
       let username: string | null = null;
       let email = profile.accountBinding?.email ?? null;
       let siteUrl = profile.accountBinding?.siteUrl ?? null;
@@ -272,12 +327,32 @@ export class EmbeddedBrowser {
       } catch {
         // Offline / API failure — continue with local binding metadata; password fetch may still fail closed.
       }
+      if (!username) {
+        try {
+          const listed = await this.syncService.getAccounts(profile.platform);
+          const match = listed.find((a) => a.accountId === accountId);
+          username = match?.username ?? null;
+          email = email ?? match?.email ?? null;
+        } catch {
+          // ignore
+        }
+      }
 
-      const result = await this.authOrchestrator.runAfterBrowserOpen({
+      const willLikelyRunAuth = hasExplicitTagContext(resolvedTag);
+      if (willLikelyRunAuth) {
+        await this.interactionLock.lock({
+          reason: "auth_script",
+          onStop: () => {
+            this.authAbort?.abort();
+          },
+        });
+      }
+
+      let result = await this.authOrchestrator.runAfterBrowserOpen({
         browserId,
         accountId,
         partition: profile.partition,
-        tag,
+        tag: resolvedTag,
         webContents: this.view?.webContents,
         account: {
           accountId,
@@ -287,7 +362,45 @@ export class EmbeddedBrowser {
           getPassword: () => this.syncService.getAccountPassword(accountId, browserId),
         },
         runCheckpoint,
+        signal,
       });
+
+      // HUMAN_REQUIRED: unlock for user, wait for resume, relock, then stop (no second Auth).
+      if (result.code === "HUMAN_REQUIRED") {
+        await this.interactionLock.unlockForHuman({
+          reason: "HUMAN_REQUIRED",
+          message: result.message,
+        });
+        this.lastAuthResult = result;
+        this.lastError = result.message;
+        this.notify();
+        try {
+          await this.waitForHumanResume(signal);
+          await this.interactionLock.relockAfterHuman({
+            reason: "resume_after_human",
+            onStop: () => this.authAbort?.abort(),
+          });
+          // Do not re-run Auth in the same execution — Checkpoint only after human.
+          const afterHuman = await runCheckpoint();
+          result = {
+            ...result,
+            code: afterHuman.status === "present" ? "CHECKPOINT_PASSED" : "CHECKPOINT_FAILED",
+            phase: "checkpoint",
+            checkpointStatus: afterHuman.status,
+            message:
+              afterHuman.status === "present"
+                ? "HUMAN_REQUIRED đã xử lý; Checkpoint PRESENT."
+                : "HUMAN_REQUIRED đã xử lý nhưng Checkpoint chưa PASS — dừng, không retry Auth.",
+          };
+        } catch {
+          result = {
+            ...result,
+            code: "AUTH_CANCELLED",
+            message: "Auth bị hủy trong lúc chờ xác minh thủ công.",
+          };
+        }
+      }
+
       this.lastAuthResult = result;
       logClientEvent("Auth pipeline finished", {
         browserId,
@@ -297,6 +410,10 @@ export class EmbeddedBrowser {
         checkpointStatus: result.checkpointStatus,
         packageKey: result.packageKey,
         releaseId: result.releaseId,
+        version: result.version,
+        actionTagId: result.actionTagId,
+        actionTagKey: result.actionTagKey,
+        authRuns: result.authRuns,
       });
       if (
         result.code === "AUTH_EXECUTION_FAILED" ||
@@ -304,18 +421,121 @@ export class EmbeddedBrowser {
         result.code === "AUTH_INTEGRITY_FAILED" ||
         result.code === "AUTH_DOWNLOAD_FAILED" ||
         result.code === "NO_ACCOUNT_TAG_ENTITLEMENT" ||
-        result.code === "CLIENT_LEASE_INVALID"
+        result.code === "CLIENT_LEASE_INVALID" ||
+        result.code === "AUTH_CONTEXT_AMBIGUOUS" ||
+        result.code === "AUTH_CONTEXT_UNAVAILABLE" ||
+        result.code === "AUTH_CANCELLED" ||
+        result.code === "CHECKPOINT_FAILED" ||
+        result.code === "HUMAN_REQUIRED"
       ) {
         this.lastError = result.message;
-        this.notify();
       }
+      this.notify();
     } catch (err) {
       logClientError("Auth pipeline unexpected error — Browser remains open for manual login", err);
       void runCheckpoint();
+    } finally {
+      await this.interactionLock.release("auth_pipeline_end");
+      this.authAbort = null;
+      this.notify();
     }
   }
 
+  /**
+   * Profile Open bridge: Account ID → Addon auth/context → 0/1/N eligible tags.
+   * Returns undefined when none (manual login). Returns null when ambiguous/error (stop Auth).
+   */
+  private async resolveTagFromAccountContext(
+    accountId: string
+  ): Promise<AuthTagContext | null | undefined> {
+    if (!this.authContextFinder) {
+      logClientEvent("AUTH_SKIPPED", {
+        reason: "no_auth_context_finder",
+        accountId,
+      });
+      return undefined;
+    }
+
+    const found = await this.authContextFinder.findForAccount(accountId);
+    if (found.kind === "none") {
+      this.lastAuthResult = {
+        code: "NO_AUTH_CONFIGURED",
+        phase: "skipped",
+        authExecutionOk: false,
+        checkpointStatus: "unknown",
+        message: found.message,
+        authRuns: 0,
+      };
+      return undefined;
+    }
+    if (found.kind === "unique") {
+      return found.tag;
+    }
+    if (found.kind === "ambiguous") {
+      this.lastAuthResult = {
+        code: "AUTH_CONTEXT_AMBIGUOUS",
+        phase: "skipped",
+        authExecutionOk: false,
+        checkpointStatus: "unknown",
+        message: found.message,
+        authRuns: 0,
+      };
+      this.lastError = found.message;
+      this.notify();
+      return null;
+    }
+    this.lastAuthResult = {
+      code: found.code === "CLIENT_LEASE_INVALID" ? found.code : "AUTH_CONTEXT_UNAVAILABLE",
+      phase: "skipped",
+      authExecutionOk: false,
+      checkpointStatus: "unknown",
+      message: found.message,
+      serverError: found.serverError,
+      authRuns: 0,
+    };
+    // Offline / endpoint missing → fail closed to manual login (do not invent tag).
+    logClientEvent("AUTH_SKIPPED", {
+      reason: "auth_context_error",
+      code: found.code,
+      accountId,
+    });
+    return undefined;
+  }
+
+  private waitForHumanResume(signal?: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new Error("AUTH_CANCELLED"));
+        return;
+      }
+      const onAbort = () => {
+        this.humanResumeWait = null;
+        reject(new Error("AUTH_CANCELLED"));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.humanResumeWait = {
+        resolve: () => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        },
+        reject: (err) => {
+          signal?.removeEventListener("abort", onAbort);
+          reject(err);
+        },
+      };
+      this.notify();
+    });
+  }
+
   async stop(): Promise<void> {
+    this.authAbort?.abort();
+    this.authAbort = null;
+    if (this.humanResumeWait) {
+      this.humanResumeWait.reject(new Error("AUTH_CANCELLED"));
+      this.humanResumeWait = null;
+    }
+    await this.interactionLock.release("browser_stop");
+
     if (!this.view) {
       if (this.activeBrowserId) {
         await this.profileManager.setStatus(this.activeBrowserId, "stopped");

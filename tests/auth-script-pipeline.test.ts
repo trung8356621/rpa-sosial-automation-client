@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { AuthScriptResolver } from "../src/main/auth/auth-script-resolver.js";
 import { AuthScriptLoader, validatePinnedIdentity } from "../src/main/auth/auth-script-loader.js";
-import { AuthScriptRunner, describeUnsupportedStep } from "../src/main/auth/auth-script-runner.js";
+import { AuthScriptRunner, describeUnsupportedStep, resolveSelector } from "../src/main/auth/auth-script-runner.js";
 import { BrowserOpenOrchestrator } from "../src/main/auth/browser-open-orchestrator.js";
 import { resolveCredentialBindings, isPasswordKey } from "../src/main/auth/credential-mapper.js";
 import { mapServerErrorToCode } from "../src/main/auth/outcomes.js";
@@ -147,6 +147,44 @@ test("2. Tag without Auth pin → NO_AUTH_CONFIGURED", async () => {
 
   assert.equal(result.code, "NO_AUTH_CONFIGURED");
   assert.equal(result.authExecutionOk, false);
+  assert.equal(result.authRuns ?? 0, 0);
+});
+
+test("2b. Session already valid → skip Auth (0 runs)", async () => {
+  let resolveCalls = 0;
+  const orch = new BrowserOpenOrchestrator({
+    resolver: new AuthScriptResolver(
+      mockConnection(async () => {
+        resolveCalls += 1;
+        throw new Error("resolve must not run when session valid");
+      })
+    ),
+    loader: new AuthScriptLoader(
+      mockConnection(async () => {
+        throw new Error("pull must not run");
+      })
+    ),
+    runner: {
+      run: async () => {
+        throw new Error("runner must not run");
+      },
+    },
+  });
+
+  const result = await orch.runAfterBrowserOpen({
+    browserId: "b2b",
+    accountId: "acc-1",
+    partition: "persist:rpa-client-b2b",
+    tag: { actionTagId: 10 },
+    webContents: { isDestroyed: () => false } as never,
+    account: { accountId: "acc-1", getPassword: async () => "x" },
+    runCheckpoint: async () => presentSignal(),
+  });
+
+  assert.equal(result.code, "SESSION_VALID");
+  assert.equal(result.authRuns, 0);
+  assert.equal(resolveCalls, 0);
+  assert.equal(result.checkpointStatus, "present");
 });
 
 test("3. Valid explicit Tag with Auth pin → resolve+pull identity", async () => {
@@ -323,10 +361,17 @@ test("11. Auth succeeds and Checkpoint passes → CHECKPOINT_PASSED", async () =
     if (path.endsWith("/auth/resolve")) return { ok: true, release: expected };
     return { ok: true, release: full };
   });
+  let authRuns = 0;
+  let checkpointN = 0;
   const orch = new BrowserOpenOrchestrator({
     resolver: new AuthScriptResolver(conn),
     loader: new AuthScriptLoader(conn),
-    runner: { run: async () => ({ kind: "ok" as const, stepsExecuted: 4 }) },
+    runner: {
+      run: async () => {
+        authRuns += 1;
+        return { kind: "ok" as const, stepsExecuted: 4 };
+      },
+    },
   });
   const result = await orch.runAfterBrowserOpen({
     browserId: "b11",
@@ -335,11 +380,45 @@ test("11. Auth succeeds and Checkpoint passes → CHECKPOINT_PASSED", async () =
     tag: { actionTagId: 10 },
     webContents: { isDestroyed: () => false } as never,
     account: { accountId: "acc-1", email: "a@test.com", getPassword: async () => "x" },
-    runCheckpoint: async () => presentSignal(),
+    // Initial absent → Auth once → post-Auth present
+    runCheckpoint: async () => {
+      checkpointN += 1;
+      return checkpointN === 1 ? absentSignal() : presentSignal();
+    },
   });
   assert.equal(result.code, "CHECKPOINT_PASSED");
   assert.equal(result.authExecutionOk, true);
   assert.equal(result.checkpointStatus, "present");
+  assert.equal(authRuns, 1);
+  assert.equal(result.authRuns, 1);
+});
+
+test("11b. Empty Auth manifest steps → AUTH_EXECUTION_FAILED (no fake steps)", async () => {
+  const expected = baseRelease();
+  const empty = pulled({
+    manifest: { script_id: "wordpress.login", variables: [], steps: [] },
+  });
+  const conn = mockConnection(async (path) => {
+    if (path.endsWith("/auth/resolve")) return { ok: true, release: expected };
+    return { ok: true, release: empty };
+  });
+  const orch = new BrowserOpenOrchestrator({
+    resolver: new AuthScriptResolver(conn),
+    loader: new AuthScriptLoader(conn),
+    runner: new AuthScriptRunner(),
+  });
+  const result = await orch.runAfterBrowserOpen({
+    browserId: "b11b",
+    accountId: "acc-1",
+    partition: "persist:rpa-client-b11b",
+    tag: { actionTagId: 10 },
+    webContents: { isDestroyed: () => false } as never,
+    account: { accountId: "acc-1", email: "a@test.com", getPassword: async () => "x" },
+    runCheckpoint: async () => absentSignal(),
+  });
+  assert.equal(result.code, "AUTH_EXECUTION_FAILED");
+  assert.match(result.message, /không có steps/i);
+  assert.equal(result.authRuns, 1);
 });
 
 test("12. Manual login remains available after Auth failures (browser kept / checkpoint still runs)", async () => {
@@ -455,6 +534,23 @@ test("OCR / image Match-To steps are rejected (WordPress-first DOM only)", () =>
     target: { matchTo: "middle", ocr: { confirmed: true } },
   });
   assert.ok(msg && /OCR|Match-To/i.test(msg));
+});
+
+test("Script Creator target.css / target.selector is accepted; unsupported action fails closed", () => {
+  assert.equal(
+    resolveSelector({ action: "fill", target: { css: "#user_login" } }),
+    "#user_login"
+  );
+  assert.equal(
+    resolveSelector({ action: "click", target: { selector: "#wp-submit" } }),
+    "#wp-submit"
+  );
+  const unsupported = describeUnsupportedStep({
+    id: "s1",
+    action: "drag",
+    selector: "#x",
+  });
+  assert.ok(unsupported && /không hỗ trợ/i.test(unsupported));
 });
 
 test("openBrowser contract allows optional Action Tag without requiring it", () => {
