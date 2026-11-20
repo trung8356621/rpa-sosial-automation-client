@@ -76,7 +76,8 @@ test("Keep Alive initializes without Browser Profile infrastructure", async () =
     assert.equal(diag.storageReady, true);
     assert.equal(diag.browserRequired, false);
     assert.equal(diag.claimRuntimeEnabled, false);
-    assert.equal(diag.phase, "durable-sync-local");
+    assert.equal(diag.phase, "registration-assignment");
+    assert.equal(diag.snapshotSyncStatus, "not_implemented");
     assert.ok(diag.dbPath?.includes("keepalive.sqlite"));
 
     node.destroy();
@@ -107,7 +108,8 @@ test("wiring contract: Keep Alive IPC and UI present; claim remains opt-in", asy
   assert.match(store, /keepAlive24x7Enabled/);
   assert.match(shell, /KeepAliveDiagnosticsPanel/);
   assert.match(panel, /Keep Alive 24\/7/);
-  assert.match(panel, /Detected gaps/);
+  assert.match(panel, /Registration/);
   assert.match(panel, /Storage health/);
-  assert.doesNotMatch(panel, /claimCampaign|ackCampaign|fake.?sync/i);
+  assert.doesNotMatch(panel, /claimCampaign|ackCampaign/i);
+  assert.match(panel, /không giả lập đồng bộ thành công/);
 });

@@ -174,6 +174,7 @@ export class KeepAliveSqliteStore {
         campaign_id TEXT NOT NULL,
         node_id TEXT NOT NULL,
         assignment_generation INTEGER NOT NULL,
+        row_version INTEGER NOT NULL DEFAULT 0,
         assigned_at TEXT NOT NULL,
         status TEXT NOT NULL,
         PRIMARY KEY (tenant_id, campaign_id, node_id)
@@ -260,6 +261,14 @@ export class KeepAliveSqliteStore {
         plan_json TEXT NOT NULL
       );
     `);
+    this.ensureColumn("campaign_assignments", "row_version", "INTEGER NOT NULL DEFAULT 0");
+  }
+
+  private ensureColumn(table: string, column: string, ddlType: string): void {
+    const db = this.requireDb();
+    const info = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{ name: string }>;
+    if (info.some((c) => c.name === column)) return;
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddlType};`);
   }
 
   private requireDb(): DatabaseSync {
@@ -288,18 +297,21 @@ export class KeepAliveSqliteStore {
     campaignId: string;
     nodeId: string;
     assignmentGeneration: number;
+    rowVersion?: number;
     status?: "assigned" | "revoked";
     assignedAt?: string;
   }): CampaignAssignment {
     const assignedAt = input.assignedAt ?? new Date().toISOString();
     const status = input.status ?? "assigned";
+    const rowVersion = input.rowVersion ?? 0;
     this.requireDb()
       .prepare(
         `INSERT INTO campaign_assignments
-          (tenant_id, campaign_id, node_id, assignment_generation, assigned_at, status)
-         VALUES (?, ?, ?, ?, ?, ?)
+          (tenant_id, campaign_id, node_id, assignment_generation, row_version, assigned_at, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(tenant_id, campaign_id, node_id) DO UPDATE SET
            assignment_generation = excluded.assignment_generation,
+           row_version = excluded.row_version,
            assigned_at = excluded.assigned_at,
            status = excluded.status`
       )
@@ -308,6 +320,7 @@ export class KeepAliveSqliteStore {
         input.campaignId,
         input.nodeId,
         input.assignmentGeneration,
+        rowVersion,
         assignedAt,
         status
       );
@@ -316,6 +329,7 @@ export class KeepAliveSqliteStore {
       campaignId: input.campaignId,
       nodeId: input.nodeId,
       assignmentGeneration: input.assignmentGeneration,
+      rowVersion,
       assignedAt,
       status,
     };
@@ -325,7 +339,9 @@ export class KeepAliveSqliteStore {
     const row = this.requireDb()
       .prepare(
         `SELECT tenant_id AS tenantId, campaign_id AS campaignId, node_id AS nodeId,
-                assignment_generation AS assignmentGeneration, assigned_at AS assignedAt, status
+                assignment_generation AS assignmentGeneration,
+                COALESCE(row_version, 0) AS rowVersion,
+                assigned_at AS assignedAt, status
          FROM campaign_assignments
          WHERE tenant_id = ? AND campaign_id = ? AND node_id = ?`
       )
@@ -337,12 +353,28 @@ export class KeepAliveSqliteStore {
     return this.requireDb()
       .prepare(
         `SELECT tenant_id AS tenantId, campaign_id AS campaignId, node_id AS nodeId,
-                assignment_generation AS assignmentGeneration, assigned_at AS assignedAt, status
+                assignment_generation AS assignmentGeneration,
+                COALESCE(row_version, 0) AS rowVersion,
+                assigned_at AS assignedAt, status
          FROM campaign_assignments
          WHERE node_id = ? AND status = ?
          ORDER BY assigned_at ASC`
       )
       .all(nodeId, status) as unknown as CampaignAssignment[];
+  }
+
+  listAllAssignmentsForNode(nodeId: string): CampaignAssignment[] {
+    return this.requireDb()
+      .prepare(
+        `SELECT tenant_id AS tenantId, campaign_id AS campaignId, node_id AS nodeId,
+                assignment_generation AS assignmentGeneration,
+                COALESCE(row_version, 0) AS rowVersion,
+                assigned_at AS assignedAt, status
+         FROM campaign_assignments
+         WHERE node_id = ?
+         ORDER BY assigned_at ASC`
+      )
+      .all(nodeId) as unknown as CampaignAssignment[];
   }
 
   insertSnapshot(row: CampaignSnapshotRecord): void {

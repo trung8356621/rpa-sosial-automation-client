@@ -146,23 +146,39 @@ export interface ClientNotification {
   created_at?: string | null;
 }
 
-/** Keep Alive 24/7 Recovery Node diagnostics (local durable sync; no Server ACK). */
+/** Keep Alive 24/7 Recovery Node diagnostics (registration/assignment; no Job claim). */
 export interface KeepAliveDiagnostics {
   enabled: boolean;
   storageReady: boolean;
   nodeId: string | null;
   assignedCampaignCount: number;
+  serverAssignmentCount: number | null;
   campaignCount: number;
   jobCount: number;
   pendingSyncCount: number;
   lastAppliedSequence: number | null;
   detectedGapCount: number;
   lastRecoveryAttemptAt: string | null;
+  lastAssignmentRefreshAt: string | null;
   lastSyncAt: string | null;
+  lastHttpError: string | null;
+  registrationStatus:
+    | "idle"
+    | "registered"
+    | "error"
+    | "stopped"
+    | "auth_blocked"
+    | "protocol_mismatch"
+    | "offline";
+  localDataAvailable: boolean;
+  serverRegistrationConfirmed: boolean;
+  campaignAssignmentConfirmed: boolean;
+  /** Snapshot sync is not implemented in 3B.2 — never PASS. */
+  snapshotSyncStatus: "not_implemented";
   storageBytes: number;
   storageHealth: "ok" | "degraded" | "unavailable";
   dbPath: string | null;
-  phase: "durable-sync-local";
+  phase: "registration-assignment";
   browserRequired: false;
   claimRuntimeEnabled: false;
 }
@@ -207,7 +223,8 @@ export type ClientCommand =
   | { type: "getWindowsNotificationStatus" }
   | { type: "openWindowsNotificationSettings" }
   | { type: "getKeepAliveDiagnostics" }
-  | { type: "setKeepAliveEnabled"; enabled: boolean };
+  | { type: "setKeepAliveEnabled"; enabled: boolean }
+  | { type: "refreshKeepAliveAssignments" };
 
 export interface ClientApi {
   invoke: <T = unknown>(command: ClientCommand) => Promise<T>;

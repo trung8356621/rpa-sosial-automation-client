@@ -4,8 +4,10 @@
  */
 
 export const KEEPALIVE_SCHEMA_VERSION = 2;
+export const KEEPALIVE_PROTOCOL_VERSION = "keepalive.v1";
 export const KEEPALIVE_SNAPSHOT_PAYLOAD_VERSION = 1;
 export const KEEPALIVE_EVENT_PAYLOAD_VERSION = 1;
+export const KEEPALIVE_CAPABILITIES = ["observe", "store", "recover"] as const;
 
 export const JOB_EVENT_TYPES = [
   "job_reserved",
@@ -57,9 +59,23 @@ export interface CampaignAssignment {
   campaignId: string;
   nodeId: string;
   assignmentGeneration: number;
+  /** Server-owned optimistic concurrency token (0 if unknown). */
+  rowVersion: number;
   assignedAt: string;
   status: "assigned" | "revoked";
 }
+
+export type KeepAliveRegistrationStatus =
+  | "idle"
+  | "registered"
+  | "error"
+  | "stopped"
+  | "auth_blocked"
+  | "protocol_mismatch"
+  | "offline";
+
+/** Snapshot sync is a later phase — never report PASS here. */
+export type KeepAliveSnapshotSyncStatus = "not_implemented";
 
 export interface CampaignSnapshotInput {
   tenantId: string;
@@ -179,19 +195,28 @@ export interface KeepAliveDiagnosticsV2 {
   enabled: boolean;
   storageReady: boolean;
   nodeId: string | null;
-  /** Explicit assignments only — not every Campaign. */
+  /** Explicit local assignments (status=assigned). */
   assignedCampaignCount: number;
+  /** Server-reported count from last successful assignments fetch. */
+  serverAssignmentCount: number | null;
   campaignCount: number;
   jobCount: number;
   pendingSyncCount: number;
   lastAppliedSequence: number | null;
   detectedGapCount: number;
   lastRecoveryAttemptAt: string | null;
+  lastAssignmentRefreshAt: string | null;
   lastSyncAt: string | null;
+  lastHttpError: string | null;
+  registrationStatus: KeepAliveRegistrationStatus;
+  localDataAvailable: boolean;
+  serverRegistrationConfirmed: boolean;
+  campaignAssignmentConfirmed: boolean;
+  snapshotSyncStatus: KeepAliveSnapshotSyncStatus;
   storageBytes: number;
   storageHealth: StorageHealth;
   dbPath: string | null;
-  phase: "durable-sync-local";
+  phase: "registration-assignment";
   browserRequired: false;
   claimRuntimeEnabled: false;
 }

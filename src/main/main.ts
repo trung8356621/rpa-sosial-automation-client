@@ -27,6 +27,7 @@ import { CampaignJobWorker } from "./jobs/campaign-job-worker.js";
 import { CampaignScriptLoader } from "./jobs/campaign-script-loader.js";
 import { createCampaignJobBrowserHost } from "./jobs/browser-host-adapter.js";
 import { KeepAliveNodeService } from "./keepalive/keepalive-node.js";
+import { KeepAliveSyncService } from "./keepalive/keepalive-sync-service.js";
 import type { ClientCommand, BrowserStateSnapshot, ClientNotification } from "../shared/contracts.js";
 import { APP_USER_MODEL_ID } from "../shared/windows-notification.js";
 import { sharedBrowserVirtualClipboard } from "./browser/browser-virtual-clipboard.js";
@@ -97,6 +98,7 @@ const deviceManager = new DeviceManager(userDataPath);
 const connection = new ClientConnection(store, credentials, deviceManager);
 const profileManager = new ProfileManager(userDataPath);
 const keepAliveNode = new KeepAliveNodeService(userDataPath, store);
+let keepAliveSync: KeepAliveSyncService | null = null;
 let syncService: BrowserSyncService | null = null;
 let embeddedBrowser: EmbeddedBrowser | null = null;
 let notificationOrchestrator: NotificationOrchestrator | null = null;
@@ -260,6 +262,12 @@ async function bootstrap() {
   await profileManager.initialize();
   // Keep Alive storage + settings — no Browser Profile required.
   await keepAliveNode.initialize();
+  keepAliveSync = new KeepAliveSyncService(connection, keepAliveNode);
+  keepAliveNode.attachSyncService(keepAliveSync);
+  if (keepAliveNode.isEnabled()) {
+    // Register/assignments only when Client is already online; otherwise waits on reconnect.
+    void keepAliveSync.onEnabledChanged(true);
+  }
 
   mainWindow = createWindow();
 
@@ -474,6 +482,8 @@ async function bootstrap() {
         return await keepAliveNode.getDiagnostics();
       case "setKeepAliveEnabled":
         return await keepAliveNode.setEnabled(cmd.enabled === true);
+      case "refreshKeepAliveAssignments":
+        return await keepAliveNode.refreshAssignments();
       case "copyAccountEmail": {
         try {
           const browserId = assertBrowserBoundToAccount(cmd.browserId, cmd.accountId);

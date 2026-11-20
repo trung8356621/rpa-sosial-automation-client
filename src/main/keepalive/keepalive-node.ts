@@ -15,21 +15,23 @@ import { KeepAliveSqliteStore } from "./keepalive-sqlite.js";
 import { upsertCampaignSnapshot } from "./snapshot-engine.js";
 import { ingestJobEvent } from "./journal-engine.js";
 import { prepareRecovery } from "./recovery-engine.js";
+import type { KeepAliveSyncService, KeepAliveSyncState } from "./keepalive-sync-service.js";
 
 /** @deprecated Phase 1 alias — prefer KeepAliveDiagnosticsV2 */
 export type KeepAliveDiagnostics = KeepAliveDiagnosticsV2;
 
 /**
- * Keep Alive 24/7 Recovery Node — Phase 2 durable local sync engine.
+ * Keep Alive 24/7 Recovery Node — Phase 2 storage + Phase 3B.2 registration/assignments.
  *
  * Initializes SQLite without Browser Profile.
- * Does not claim Campaigns, ACK Server, execute Jobs, or touch cookies/identity.
+ * Does not claim Campaigns, ACK Job execute, or touch cookies/identity.
  */
 export class KeepAliveNodeService {
   private readonly store: KeepAliveSqliteStore;
   private initialized = false;
   private nodeId: string | null = null;
   private lastRecoveryPlan: RecoveryPlan | null = null;
+  private syncService: KeepAliveSyncService | null = null;
 
   constructor(
     private readonly userDataPath: string,
@@ -53,6 +55,15 @@ export class KeepAliveNodeService {
 
   getLastRecoveryPlan(): RecoveryPlan | null {
     return this.lastRecoveryPlan;
+  }
+
+  attachSyncService(sync: KeepAliveSyncService): void {
+    this.syncService = sync;
+  }
+
+  /** Public ensure for sync service (avoids private access). */
+  async ensureInitializedPublic(): Promise<void> {
+    await this.ensureReady();
   }
 
   /**
@@ -94,28 +105,49 @@ export class KeepAliveNodeService {
     if (enabled && this.nodeId) {
       this.lastRecoveryPlan = prepareRecovery(this.store, this.nodeId);
     }
+    if (this.syncService) {
+      await this.syncService.onEnabledChanged(enabled);
+    }
+    return this.getDiagnostics();
+  }
+
+  async refreshAssignments(): Promise<KeepAliveDiagnosticsV2> {
+    await this.ensureReady();
+    if (this.syncService) {
+      await this.syncService.refreshAssignments("manual");
+    }
     return this.getDiagnostics();
   }
 
   async getDiagnostics(): Promise<KeepAliveDiagnosticsV2> {
     await this.ensureReady();
     const stats = await this.store.getStats(this.nodeId);
+    const sync: KeepAliveSyncState | null = this.syncService?.getState() ?? null;
+    const localAssigned = stats.assignedCampaignCount;
     return {
       enabled: this.isEnabled(),
       storageReady: this.store.isOpen,
       nodeId: this.nodeId,
-      assignedCampaignCount: stats.assignedCampaignCount,
+      assignedCampaignCount: localAssigned,
+      serverAssignmentCount: sync?.serverAssignmentCount ?? null,
       campaignCount: stats.campaignCount,
       jobCount: stats.jobCount,
       pendingSyncCount: stats.pendingSyncCount,
       lastAppliedSequence: stats.lastAppliedSequence,
       detectedGapCount: stats.detectedGapCount,
       lastRecoveryAttemptAt: stats.lastRecoveryAttemptAt,
+      lastAssignmentRefreshAt: sync?.lastAssignmentRefreshAt ?? null,
       lastSyncAt: stats.lastSyncAt,
+      lastHttpError: sync?.lastHttpError ?? null,
+      registrationStatus: sync?.registrationStatus ?? (this.isEnabled() ? "idle" : "stopped"),
+      localDataAvailable: stats.campaignCount > 0 || stats.jobCount > 0 || localAssigned > 0,
+      serverRegistrationConfirmed: sync?.serverRegistrationConfirmed === true,
+      campaignAssignmentConfirmed: sync?.campaignAssignmentConfirmed === true,
+      snapshotSyncStatus: "not_implemented",
       storageBytes: stats.storageBytes,
       storageHealth: stats.storageHealth,
       dbPath: stats.dbPath,
-      phase: "durable-sync-local",
+      phase: "registration-assignment",
       browserRequired: false,
       claimRuntimeEnabled: false,
     };
@@ -125,6 +157,7 @@ export class KeepAliveNodeService {
     tenantId: string;
     campaignId: string;
     assignmentGeneration: number;
+    rowVersion?: number;
     status?: "assigned" | "revoked";
   }): Promise<CampaignAssignment> {
     await this.ensureReady();
@@ -134,6 +167,7 @@ export class KeepAliveNodeService {
       campaignId: input.campaignId,
       nodeId: this.nodeId,
       assignmentGeneration: input.assignmentGeneration,
+      rowVersion: input.rowVersion,
       status: input.status ?? "assigned",
     });
   }
@@ -163,7 +197,6 @@ export class KeepAliveNodeService {
       storageKey: input.storageKey ?? existing?.storageKey ?? null,
       sha256: input.sha256 ?? existing?.sha256 ?? null,
       uploadStatus: input.uploadStatus ?? existing?.uploadStatus ?? "pending",
-      // Phase 2: never invent server ACK — only persist when caller supplies a real value.
       serverAckAt:
         input.serverAckAt !== undefined
           ? input.serverAckAt
@@ -194,6 +227,7 @@ export class KeepAliveNodeService {
   }
 
   destroy(): void {
+    this.syncService?.destroy();
     this.store.close();
     this.initialized = false;
   }
