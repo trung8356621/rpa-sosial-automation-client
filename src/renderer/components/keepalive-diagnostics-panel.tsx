@@ -36,6 +36,23 @@ function registrationLabel(status: KeepAliveDiagnostics["registrationStatus"] | 
   }
 }
 
+function snapshotLabel(status: KeepAliveDiagnostics["snapshotSyncStatus"] | undefined): string {
+  switch (status) {
+    case "synced":
+      return "Local synced";
+    case "partial":
+      return "Partial";
+    case "syncing":
+      return "Syncing";
+    case "error":
+      return "Error";
+    case "idle":
+      return "Idle";
+    default:
+      return "Not started";
+  }
+}
+
 export function KeepAliveDiagnosticsPanel() {
   const [diag, setDiag] = useState<KeepAliveDiagnostics | null>(null);
   const [busy, setBusy] = useState(false);
@@ -96,8 +113,8 @@ export function KeepAliveDiagnosticsPanel() {
     <div className="card keepalive-card">
       <div className="card-title">Keep Alive 24/7 Recovery Node</div>
       <div className="card-desc">
-        Đăng ký Node + nhận Campaign assignment (keepalive.v1). Không claim Job, không ACK execute,
-        không cần Browser. Snapshot sync chưa triển khai — không giả lập đồng bộ thành công.
+        Register + assignments + snapshot/event ingestion (keepalive.v1). Không claim Job, không
+        Browser. Local persistence ≠ durable server ACK.
       </div>
 
       <div className="keepalive-toggle-row">
@@ -106,7 +123,7 @@ export function KeepAliveDiagnosticsPanel() {
             Bật Keep Alive 24/7
           </div>
           <div className="keepalive-hint">
-            Bật Node ≠ ủy quyền mọi Campaign. Chỉ assignment tường minh từ Server được áp dụng.
+            Chỉ Campaign được Server assign tường minh mới được fetch snapshot/events.
           </div>
         </div>
         <label className="keepalive-switch">
@@ -123,24 +140,30 @@ export function KeepAliveDiagnosticsPanel() {
 
       <div className="info-grid keepalive-diag-grid">
         <div className="info-item">
-          <div className="info-label">Node enabled</div>
-          <div className="info-value">{enabled ? "Yes" : "No"}</div>
-        </div>
-        <div className="info-item">
           <div className="info-label">Registration</div>
           <div className="info-value">{registrationLabel(diag?.registrationStatus)}</div>
         </div>
         <div className="info-item">
-          <div className="info-label">Server registration</div>
+          <div className="info-label">Snapshot sync</div>
+          <div className="info-value">{snapshotLabel(diag?.snapshotSyncStatus)}</div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Last synced sequence</div>
           <div className="info-value">
-            {diag?.serverRegistrationConfirmed ? "Confirmed" : "Not confirmed"}
+            {diag?.lastSyncedSequence == null ? "—" : diag.lastSyncedSequence}
           </div>
         </div>
         <div className="info-item">
-          <div className="info-label">Assignment confirmed</div>
-          <div className="info-value">
-            {diag?.campaignAssignmentConfirmed ? "Yes" : "No"}
-          </div>
+          <div className="info-label">Event gaps</div>
+          <div className="info-value">{diag?.detectedGapCount ?? "—"}</div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Pending recovery</div>
+          <div className="info-value">{diag?.pendingRecovery ? "Yes" : "No"}</div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Last successful sync</div>
+          <div className="info-value">{formatTs(diag?.lastSuccessfulSyncAt ?? null)}</div>
         </div>
         <div className="info-item">
           <div className="info-label">Server assignments</div>
@@ -153,16 +176,8 @@ export function KeepAliveDiagnosticsPanel() {
           <div className="info-value">{diag?.assignedCampaignCount ?? "—"}</div>
         </div>
         <div className="info-item">
-          <div className="info-label">Local data available</div>
-          <div className="info-value">{diag?.localDataAvailable ? "Yes" : "No"}</div>
-        </div>
-        <div className="info-item">
-          <div className="info-label">Snapshot sync</div>
+          <div className="info-label">Server durable ACK</div>
           <div className="info-value">Not implemented</div>
-        </div>
-        <div className="info-item">
-          <div className="info-label">Last assignment refresh</div>
-          <div className="info-value">{formatTs(diag?.lastAssignmentRefreshAt ?? null)}</div>
         </div>
         <div className="info-item">
           <div className="info-label">Last HTTP error</div>
@@ -193,11 +208,11 @@ export function KeepAliveDiagnosticsPanel() {
           disabled={busy || !enabled}
           onClick={() => void handleRefreshAssignments()}
         >
-          Refresh assignments
+          Refresh sync
         </button>
         {diag?.storageReady ? (
           <span className="keepalive-storage-ready">
-            Storage ready · no Browser · claim OFF · snapshot sync N/A
+            Storage ready · no Browser · claim OFF · ACK pending Phase 3B.5
           </span>
         ) : null}
       </div>

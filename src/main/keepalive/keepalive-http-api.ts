@@ -8,6 +8,10 @@ import {
 
 export const KEEPALIVE_REGISTER_PATH = "/api/v1/social-automation/client/keepalive/register";
 export const KEEPALIVE_ASSIGNMENTS_PATH = "/api/v1/social-automation/client/keepalive/assignments";
+export const KEEPALIVE_CAMPAIGNS_BASE = "/api/v1/social-automation/client/keepalive/campaigns";
+
+/** Default page size for event feed (bounded). */
+export const KEEPALIVE_EVENTS_PAGE_LIMIT = 100;
 
 export type KeepAliveHttpResult<T> =
   | { ok: true; data: T; idempotent?: boolean }
@@ -40,6 +44,54 @@ export interface KeepAliveAssignmentsResponse {
   nodeId: string;
   tenantId: string;
   assignments: KeepAliveServerAssignment[];
+}
+
+export interface KeepAliveSnapshotResponse {
+  protocolVersion: string;
+  schemaVersion: number;
+  nodeId: string;
+  tenantId: string;
+  campaignId: string;
+  assignmentGeneration: number;
+  snapshotVersion: number;
+  /** Snapshot sequence watermark (persisted with snapshot). */
+  sequence: number;
+  /**
+   * Server-reported head of durable event stream.
+   * Hint for gap recovery ONLY — never proof that events were persisted locally.
+   */
+  eventSequenceHead: number | null;
+  rowVersion: number;
+  updatedAt: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface KeepAliveWireEvent {
+  eventId: string;
+  tenantId: string;
+  campaignId: string;
+  jobId: string;
+  attempt: number;
+  fencingGeneration: number;
+  eventSequence: number;
+  eventType: string;
+  timestamp: string | null;
+  payloadVersion: number;
+  payload: Record<string, unknown>;
+}
+
+export interface KeepAliveEventsResponse {
+  protocolVersion: string;
+  schemaVersion: number;
+  nodeId: string;
+  tenantId: string;
+  campaignId: string;
+  assignmentGeneration: number;
+  events: KeepAliveWireEvent[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  /** Server head hint only — not a local persistence proof. */
+  eventSequenceHead: number | null;
 }
 
 /**
@@ -122,6 +174,66 @@ export class KeepAliveHttpApi {
       return mapHttpError(err);
     }
   }
+
+  async fetchSnapshot(params: {
+    campaignId: string;
+    nodeId: string;
+    assignmentGeneration: number;
+  }): Promise<KeepAliveHttpResult<KeepAliveSnapshotResponse>> {
+    if (!this.connection.isOnline()) {
+      return offlineResult("Client chưa online — không tải snapshot.");
+    }
+    const qs = new URLSearchParams({
+      node_id: params.nodeId,
+      assignment_generation: String(params.assignmentGeneration),
+    });
+    const path = `${KEEPALIVE_CAMPAIGNS_BASE}/${encodeURIComponent(params.campaignId)}/snapshot?${qs}`;
+    try {
+      const res = await this.connection.requestWithAuth(path, "GET");
+      return parseSnapshotResponse(res, params.nodeId, params.campaignId);
+    } catch (err) {
+      return mapHttpError(err);
+    }
+  }
+
+  async fetchEvents(params: {
+    campaignId: string;
+    nodeId: string;
+    assignmentGeneration: number;
+    fromSequence?: number;
+    toSequence?: number;
+    cursor?: string | null;
+    limit?: number;
+  }): Promise<KeepAliveHttpResult<KeepAliveEventsResponse>> {
+    if (!this.connection.isOnline()) {
+      return offlineResult("Client chưa online — không tải event feed.");
+    }
+    const qs = new URLSearchParams({
+      node_id: params.nodeId,
+      assignment_generation: String(params.assignmentGeneration),
+      limit: String(params.limit ?? KEEPALIVE_EVENTS_PAGE_LIMIT),
+    });
+    if (params.fromSequence != null) qs.set("from_sequence", String(params.fromSequence));
+    if (params.toSequence != null) qs.set("to_sequence", String(params.toSequence));
+    if (params.cursor) qs.set("cursor", params.cursor);
+    const path = `${KEEPALIVE_CAMPAIGNS_BASE}/${encodeURIComponent(params.campaignId)}/events?${qs}`;
+    try {
+      const res = await this.connection.requestWithAuth(path, "GET");
+      return parseEventsResponse(res, params.nodeId, params.campaignId);
+    } catch (err) {
+      return mapHttpError(err);
+    }
+  }
+}
+
+function offlineResult(message: string): KeepAliveHttpResult<never> {
+  return {
+    ok: false,
+    status: 0,
+    code: "client_offline",
+    message,
+    fatal: false,
+  };
 }
 
 export function parseRegisterResponse(
@@ -253,6 +365,236 @@ export function parseAssignmentsResponse(
   };
 }
 
+export function parseSnapshotResponse(
+  raw: Record<string, unknown>,
+  expectedNodeId: string,
+  expectedCampaignId: string
+): KeepAliveHttpResult<KeepAliveSnapshotResponse> {
+  const protocolVersion = str(raw.protocol_version) ?? str(raw.protocolVersion);
+  const schemaVersion = num(raw.schema_version) ?? num(raw.schemaVersion);
+  const nodeId = str(raw.node_id) ?? str(raw.nodeId) ?? expectedNodeId;
+  const tenantId = str(raw.tenant_id) ?? str(raw.tenantId);
+  const campaignId =
+    str(raw.campaign_id) ?? str(raw.campaignId) ?? expectedCampaignId;
+  const assignmentGeneration =
+    num(raw.assignment_generation) ?? num(raw.assignmentGeneration);
+  const snapshotVersion = num(raw.snapshot_version) ?? num(raw.snapshotVersion);
+  const sequence = num(raw.sequence) ?? num(raw.snapshot_sequence) ?? 0;
+  const eventSequenceHead =
+    num(raw.event_sequence_head) ?? num(raw.eventSequenceHead);
+  const rowVersion =
+    num(raw.row_version) ?? num(raw.rowVersion) ?? num(raw.version) ?? 0;
+  const updatedAt = str(raw.updated_at) ?? str(raw.updatedAt);
+
+  const proto = checkProtocol(protocolVersion, schemaVersion);
+  if (!proto.ok) return proto;
+  if (nodeId !== expectedNodeId) {
+    return {
+      ok: false,
+      status: 422,
+      code: "node_id_mismatch",
+      message: "Snapshot node_id không khớp Keep Alive node cục bộ.",
+      fatal: true,
+    };
+  }
+  if (!tenantId) {
+    return {
+      ok: false,
+      status: 422,
+      code: "tenant_id_missing",
+      message: "Snapshot thiếu server-owned tenant_id (installation_id).",
+      fatal: true,
+    };
+  }
+  if (campaignId !== expectedCampaignId) {
+    return {
+      ok: false,
+      status: 422,
+      code: "campaign_id_mismatch",
+      message: "Snapshot campaign_id không khớp request.",
+      fatal: true,
+    };
+  }
+  if (assignmentGeneration == null || assignmentGeneration < 1) {
+    return {
+      ok: false,
+      status: 422,
+      code: "assignment_generation_missing",
+      message: "Snapshot thiếu assignment_generation.",
+      fatal: true,
+    };
+  }
+  if (snapshotVersion == null || snapshotVersion < 1) {
+    return {
+      ok: false,
+      status: 422,
+      code: "snapshot_version_missing",
+      message: "Snapshot thiếu snapshot_version.",
+      fatal: true,
+    };
+  }
+
+  const metaRaw = raw.metadata ?? raw.meta ?? {};
+  if (!metaRaw || typeof metaRaw !== "object" || Array.isArray(metaRaw)) {
+    return {
+      ok: false,
+      status: 422,
+      code: "metadata_invalid",
+      message: "Snapshot metadata phải là object.",
+      fatal: true,
+    };
+  }
+
+  return {
+    ok: true,
+    data: {
+      protocolVersion: protocolVersion!,
+      schemaVersion: schemaVersion!,
+      nodeId,
+      tenantId,
+      campaignId,
+      assignmentGeneration,
+      snapshotVersion,
+      sequence,
+      eventSequenceHead,
+      rowVersion,
+      updatedAt,
+      metadata: metaRaw as Record<string, unknown>,
+    },
+  };
+}
+
+export function parseEventsResponse(
+  raw: Record<string, unknown>,
+  expectedNodeId: string,
+  expectedCampaignId: string
+): KeepAliveHttpResult<KeepAliveEventsResponse> {
+  const protocolVersion = str(raw.protocol_version) ?? str(raw.protocolVersion);
+  const schemaVersion = num(raw.schema_version) ?? num(raw.schemaVersion);
+  const nodeId = str(raw.node_id) ?? str(raw.nodeId) ?? expectedNodeId;
+  const tenantId = str(raw.tenant_id) ?? str(raw.tenantId);
+  const campaignId =
+    str(raw.campaign_id) ?? str(raw.campaignId) ?? expectedCampaignId;
+  const assignmentGeneration =
+    num(raw.assignment_generation) ?? num(raw.assignmentGeneration) ?? 0;
+  const eventSequenceHead =
+    num(raw.event_sequence_head) ?? num(raw.eventSequenceHead);
+  const nextCursor = str(raw.next_cursor) ?? str(raw.nextCursor);
+  const hasMore =
+    raw.has_more === true ||
+    raw.hasMore === true ||
+    (nextCursor != null && nextCursor.length > 0);
+
+  const proto = checkProtocol(protocolVersion, schemaVersion);
+  if (!proto.ok) return proto;
+  if (nodeId !== expectedNodeId) {
+    return {
+      ok: false,
+      status: 422,
+      code: "node_id_mismatch",
+      message: "Events feed node_id không khớp Keep Alive node cục bộ.",
+      fatal: true,
+    };
+  }
+  if (!tenantId) {
+    return {
+      ok: false,
+      status: 422,
+      code: "tenant_id_missing",
+      message: "Events feed thiếu server-owned tenant_id.",
+      fatal: true,
+    };
+  }
+  if (campaignId !== expectedCampaignId) {
+    return {
+      ok: false,
+      status: 422,
+      code: "campaign_id_mismatch",
+      message: "Events feed campaign_id không khớp request.",
+      fatal: true,
+    };
+  }
+
+  const listRaw = Array.isArray(raw.events)
+    ? raw.events
+    : Array.isArray(raw.data)
+      ? raw.data
+      : [];
+  const events: KeepAliveWireEvent[] = [];
+  for (const item of listRaw) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const eventId = str(row.event_id) ?? str(row.eventId);
+    const jobId = str(row.job_id) ?? str(row.jobId);
+    const eventSequence = num(row.event_sequence) ?? num(row.eventSequence);
+    const attempt = num(row.attempt) ?? num(row.attempt_id) ?? 1;
+    const fencingGeneration =
+      num(row.fencing_generation) ?? num(row.fencingGeneration) ?? 1;
+    const eventType = str(row.event_type) ?? str(row.eventType) ?? "";
+    const payloadVersion =
+      num(row.payload_version) ?? num(row.payloadVersion) ?? 1;
+    const explicitTenant = str(row.tenant_id) ?? str(row["tenantId"]);
+    const explicitCampaign = str(row.campaign_id) ?? str(row["campaignId"]);
+    const rowTenant: string = explicitTenant ?? tenantId;
+    const rowCampaign: string = explicitCampaign ?? campaignId;
+    if (rowTenant !== tenantId) {
+      return {
+        ok: false,
+        status: 422,
+        code: "tenant_mismatch",
+        message: "Event row tenant_id lệch envelope tenant_id.",
+        fatal: true,
+      };
+    }
+    if (rowCampaign !== campaignId) {
+      return {
+        ok: false,
+        status: 422,
+        code: "campaign_id_mismatch",
+        message: "Event row campaign_id lệch envelope.",
+        fatal: true,
+      };
+    }
+    if (!eventId || !jobId || eventSequence == null || eventSequence < 1 || !eventType) {
+      continue;
+    }
+    const payloadRaw = row.payload ?? row.data ?? {};
+    const payload =
+      payloadRaw && typeof payloadRaw === "object" && !Array.isArray(payloadRaw)
+        ? (payloadRaw as Record<string, unknown>)
+        : {};
+    events.push({
+      eventId,
+      tenantId,
+      campaignId,
+      jobId,
+      attempt,
+      fencingGeneration,
+      eventSequence,
+      eventType,
+      timestamp: str(row.timestamp) ?? str(row.created_at),
+      payloadVersion,
+      payload,
+    });
+  }
+
+  return {
+    ok: true,
+    data: {
+      protocolVersion: protocolVersion!,
+      schemaVersion: schemaVersion!,
+      nodeId,
+      tenantId,
+      campaignId,
+      assignmentGeneration,
+      events,
+      nextCursor,
+      hasMore,
+      eventSequenceHead,
+    },
+  };
+}
+
 function checkProtocol(
   protocolVersion: string | null,
   schemaVersion: number | null
@@ -282,6 +624,10 @@ function mapHttpError(err: unknown): KeepAliveHttpResult<never> {
   if (err instanceof SeoOpsHttpError) {
     const status = err.diagnostic.status;
     const code = err.diagnostic.serverErrorCode || err.diagnostic.category;
+    const staleGen =
+      status === 409 ||
+      code === "assignment_generation_stale" ||
+      code === "stale_assignment_generation";
     const fatal =
       status === 401 ||
       status === 403 ||
@@ -291,7 +637,7 @@ function mapHttpError(err: unknown): KeepAliveHttpResult<never> {
     return {
       ok: false,
       status,
-      code,
+      code: staleGen ? "assignment_generation_stale" : code,
       message: sanitize(
         err.diagnostic.serverErrorMessage || err.message || `HTTP ${status}`
       ),

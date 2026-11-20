@@ -74,8 +74,17 @@ export type KeepAliveRegistrationStatus =
   | "protocol_mismatch"
   | "offline";
 
-/** Snapshot sync is a later phase — never report PASS here. */
-export type KeepAliveSnapshotSyncStatus = "not_implemented";
+/**
+ * Snapshot + durable event sync status.
+ * Never report fake server ACK PASS — "synced" means local persistence only.
+ */
+export type KeepAliveSnapshotSyncStatus =
+  | "idle"
+  | "syncing"
+  | "synced"
+  | "partial"
+  | "error"
+  | "not_started";
 
 export interface CampaignSnapshotInput {
   tenantId: string;
@@ -213,12 +222,18 @@ export interface KeepAliveDiagnosticsV2 {
   serverRegistrationConfirmed: boolean;
   campaignAssignmentConfirmed: boolean;
   snapshotSyncStatus: KeepAliveSnapshotSyncStatus;
+  /** Max last_applied_sequence across assigned campaigns after sync. */
+  lastSyncedSequence: number | null;
+  pendingRecovery: boolean;
+  lastSuccessfulSyncAt: string | null;
   storageBytes: number;
   storageHealth: StorageHealth;
   dbPath: string | null;
-  phase: "registration-assignment";
+  phase: "snapshot-event-sync";
   browserRequired: false;
   claimRuntimeEnabled: false;
+  /** Explicit: local persistence ≠ durable server ACK. */
+  serverDurableAck: false;
 }
 
 export type SnapshotUpsertResult =

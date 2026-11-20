@@ -1,7 +1,11 @@
 import type { ClientConnection } from "../connection/client-connection.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
-import type { KeepAliveRegistrationStatus } from "./contracts.js";
+import type {
+  KeepAliveRegistrationStatus,
+  KeepAliveSnapshotSyncStatus,
+} from "./contracts.js";
 import { applyServerAssignments, revokeAllActiveAssignments } from "./assignment-apply.js";
+import { syncAllAssignedCampaignData } from "./campaign-data-sync.js";
 import { KeepAliveHttpApi } from "./keepalive-http-api.js";
 import type { KeepAliveNodeService } from "./keepalive-node.js";
 
@@ -19,6 +23,12 @@ export interface KeepAliveSyncState {
   serverRegistrationConfirmed: boolean;
   campaignAssignmentConfirmed: boolean;
   serverTenantId: string | null;
+  snapshotSyncStatus: KeepAliveSnapshotSyncStatus;
+  lastSyncedSequence: number | null;
+  pendingRecovery: boolean;
+  lastSuccessfulSyncAt: string | null;
+  detectedGapCount: number;
+  serverDurableAck: false;
 }
 
 /**
@@ -39,6 +49,11 @@ export class KeepAliveSyncService {
   private retryAttempt = 0;
   private wasOnline = false;
   private stoppedFatal = false;
+  private snapshotSyncStatus: KeepAliveSnapshotSyncStatus = "not_started";
+  private lastSyncedSequence: number | null = null;
+  private pendingRecovery = false;
+  private lastSuccessfulSyncAt: string | null = null;
+  private detectedGapCount = 0;
 
   constructor(
     private readonly connection: ClientConnection,
@@ -74,6 +89,12 @@ export class KeepAliveSyncService {
       campaignAssignmentConfirmed:
         this.registrationStatus === "registered" && this.lastAssignmentRefreshAt != null,
       serverTenantId: this.serverTenantId,
+      snapshotSyncStatus: this.snapshotSyncStatus,
+      lastSyncedSequence: this.lastSyncedSequence,
+      pendingRecovery: this.pendingRecovery,
+      lastSuccessfulSyncAt: this.lastSuccessfulSyncAt,
+      detectedGapCount: this.detectedGapCount,
+      serverDurableAck: false,
     };
   }
 
@@ -86,6 +107,9 @@ export class KeepAliveSyncService {
       this.registrationStatus = "stopped";
       this.serverAssignmentCount = null;
       this.lastHttpError = null;
+      this.snapshotSyncStatus = "idle";
+      this.lastSyncedSequence = null;
+      this.pendingRecovery = false;
       const nodeId = this.node.getNodeId();
       if (nodeId) {
         const revoked = revokeAllActiveAssignments(this.node.sqlite, nodeId);
@@ -280,10 +304,49 @@ export class KeepAliveSyncService {
       revoked: outcome.revoked,
       rejectedStale: outcome.rejectedStale,
       rejectedCrossTenant: outcome.rejectedCrossTenant,
-      snapshotSync: "not_implemented",
     });
 
-    // Local recovery plan after assignment changes — no social replay.
+    this.snapshotSyncStatus = "syncing";
+    const dataSummary = await syncAllAssignedCampaignData(
+      this.api,
+      this.node.sqlite,
+      nodeId,
+      assign.data.tenantId
+    );
+    this.snapshotSyncStatus = dataSummary.snapshotSyncStatus;
+    this.lastSyncedSequence = dataSummary.lastSyncedSequence;
+    this.pendingRecovery = dataSummary.pendingRecovery;
+    this.detectedGapCount = dataSummary.detectedGapCount;
+    if (dataSummary.lastSuccessfulSyncAt) {
+      this.lastSuccessfulSyncAt = dataSummary.lastSuccessfulSyncAt;
+      this.node.sqlite.markLocalSyncComplete(dataSummary.lastSuccessfulSyncAt);
+    }
+    if (dataSummary.lastHttpError) {
+      this.lastHttpError = dataSummary.lastHttpError;
+    }
+
+    logClientEvent("KEEPALIVE_CAMPAIGN_DATA_SYNCED", {
+      reason,
+      nodeId,
+      tenantId: assign.data.tenantId,
+      campaigns: dataSummary.outcomes.length,
+      snapshotSyncStatus: dataSummary.snapshotSyncStatus,
+      lastSyncedSequence: dataSummary.lastSyncedSequence,
+      pendingRecovery: dataSummary.pendingRecovery,
+      detectedGapCount: dataSummary.detectedGapCount,
+      serverDurableAck: false,
+      claimRuntimeEnabled: false,
+    });
+
+    if (dataSummary.needsAssignmentRefresh && reason !== "stale_generation") {
+      logClientEvent("KEEPALIVE_ASSIGNMENT_GENERATION_STALE_REFRESH", { reason, nodeId });
+      // Single follow-up assignment refresh — avoid loops.
+      queueMicrotask(() => {
+        void this.sync("stale_generation");
+      });
+    }
+
+    // Local recovery plan after sync — no social replay.
     await this.node.runRecovery();
   }
 }

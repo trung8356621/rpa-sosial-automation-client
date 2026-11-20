@@ -164,60 +164,87 @@ export function ingestJobEvent(
   if (invalid) {
     return { ok: false, status: "rejected_invalid", message: invalid };
   }
+  return store.transaction(() => ingestJobEventUnlocked(store, nodeId, input));
+}
 
+/**
+ * Ingest a page of events in one SQLite transaction.
+ * Cursor advances only for successfully applied contiguous sequences inside the txn.
+ */
+export function ingestJobEventBatch(
+  store: KeepAliveSqliteStore,
+  nodeId: string,
+  inputs: JobJournalEventInput[]
+): JournalIngestResult[] {
   return store.transaction(() => {
-    const existing = store.getJournalEvent(input.eventId);
-    if (existing) {
-      return { ok: true, status: "duplicate", event: existing };
+    const results: JournalIngestResult[] = [];
+    for (const input of inputs) {
+      const invalid = validateEvent(input);
+      if (invalid) {
+        results.push({ ok: false, status: "rejected_invalid", message: invalid });
+        continue;
+      }
+      results.push(ingestJobEventUnlocked(store, nodeId, input));
     }
-
-    const assignment = store.getAssignment(input.tenantId, input.campaignId, nodeId);
-    if (!assignment || assignment.status !== "assigned") {
-      const rejected = toRecord(input, "rejected_unauthorized");
-      store.insertJournalEvent(rejected);
-      return {
-        ok: false,
-        status: "rejected_unauthorized",
-        message: "Campaign is not assigned to this Keep Alive node",
-        event: rejected,
-      };
-    }
-
-    const stale = isStaleAgainstJobState(store, input);
-    if (stale) {
-      const rejected = toRecord(input, "rejected_stale");
-      store.insertJournalEvent(rejected);
-      bumpSeen(store, input);
-      return { ok: false, status: "rejected_stale", message: stale, event: rejected };
-    }
-
-    const cursor = store.getCursor(input.tenantId, input.campaignId);
-    const expected = (cursor?.lastAppliedSequence ?? 0) + 1;
-
-    if (input.eventSequence < expected) {
-      // Already past this sequence — keep durable copy but do not rewind state.
-      const rejected = toRecord(input, "rejected_stale");
-      store.insertJournalEvent(rejected);
-      bumpSeen(store, input);
-      return {
-        ok: false,
-        status: "rejected_stale",
-        message: "Event sequence is behind last applied sequence",
-        event: rejected,
-      };
-    }
-
-    if (input.eventSequence > expected) {
-      const buffered = toRecord(input, "buffered");
-      store.insertJournalEvent(buffered);
-      bumpSeen(store, input);
-      return { ok: true, status: "buffered", event: buffered };
-    }
-
-    const applied = toRecord(input, "applied");
-    store.insertJournalEvent(applied);
-    applyEventToState(store, applied);
-    drainBuffered(store, input.tenantId, input.campaignId);
-    return { ok: true, status: "applied", event: store.getJournalEvent(input.eventId) ?? applied };
+    return results;
   });
+}
+
+function ingestJobEventUnlocked(
+  store: KeepAliveSqliteStore,
+  nodeId: string,
+  input: JobJournalEventInput
+): JournalIngestResult {
+  const existing = store.getJournalEvent(input.eventId);
+  if (existing) {
+    return { ok: true, status: "duplicate", event: existing };
+  }
+
+  const assignment = store.getAssignment(input.tenantId, input.campaignId, nodeId);
+  if (!assignment || assignment.status !== "assigned") {
+    const rejected = toRecord(input, "rejected_unauthorized");
+    store.insertJournalEvent(rejected);
+    return {
+      ok: false,
+      status: "rejected_unauthorized",
+      message: "Campaign is not assigned to this Keep Alive node",
+      event: rejected,
+    };
+  }
+
+  const stale = isStaleAgainstJobState(store, input);
+  if (stale) {
+    const rejected = toRecord(input, "rejected_stale");
+    store.insertJournalEvent(rejected);
+    bumpSeen(store, input);
+    return { ok: false, status: "rejected_stale", message: stale, event: rejected };
+  }
+
+  const cursor = store.getCursor(input.tenantId, input.campaignId);
+  const expected = (cursor?.lastAppliedSequence ?? 0) + 1;
+
+  if (input.eventSequence < expected) {
+    const rejected = toRecord(input, "rejected_stale");
+    store.insertJournalEvent(rejected);
+    bumpSeen(store, input);
+    return {
+      ok: false,
+      status: "rejected_stale",
+      message: "Event sequence is behind last applied sequence",
+      event: rejected,
+    };
+  }
+
+  if (input.eventSequence > expected) {
+    const buffered = toRecord(input, "buffered");
+    store.insertJournalEvent(buffered);
+    bumpSeen(store, input);
+    return { ok: true, status: "buffered", event: buffered };
+  }
+
+  const applied = toRecord(input, "applied");
+  store.insertJournalEvent(applied);
+  applyEventToState(store, applied);
+  drainBuffered(store, input.tenantId, input.campaignId);
+  return { ok: true, status: "applied", event: store.getJournalEvent(input.eventId) ?? applied };
 }

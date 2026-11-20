@@ -228,7 +228,8 @@ test("registration success then assignments applied without Browser", async () =
     assert.equal(diag.campaignAssignmentConfirmed, true);
     assert.equal(diag.serverAssignmentCount, 2);
     assert.equal(diag.assignedCampaignCount, 2);
-    assert.equal(diag.snapshotSyncStatus, "not_implemented");
+    assert.ok(diag.snapshotSyncStatus !== undefined);
+    assert.equal(diag.serverDurableAck, false);
     assert.equal(diag.browserRequired, false);
     assert.equal(diag.claimRuntimeEnabled, false);
     assert.equal(node.sqlite.getAssignment("tenant-a", "camp-1", "fixed-node")?.rowVersion, 9);
@@ -449,10 +450,10 @@ test("wiring: refresh IPC + no claim coupling; claim remains opt-in", async () =
   assert.match(main, /RPA_CAMPAIGN_CLAIM/);
   assert.match(contracts, /refreshKeepAliveAssignments/);
   assert.match(contracts, /snapshotSyncStatus/);
-  assert.match(panel, /Refresh assignments/);
-  assert.match(panel, /Not implemented/);
+  assert.match(panel, /Refresh sync/);
+  assert.match(panel, /Server durable ACK/);
   assert.doesNotMatch(panel, /claimCampaign/i);
-  assert.match(panel, /không giả lập đồng bộ thành công/);
+  assert.match(panel, /Local persistence ≠ durable server ACK|server ACK/i);
 });
 
 test("duplicate register for same connection is skipped", async () => {

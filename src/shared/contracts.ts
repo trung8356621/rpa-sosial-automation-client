@@ -173,14 +173,18 @@ export interface KeepAliveDiagnostics {
   localDataAvailable: boolean;
   serverRegistrationConfirmed: boolean;
   campaignAssignmentConfirmed: boolean;
-  /** Snapshot sync is not implemented in 3B.2 — never PASS. */
-  snapshotSyncStatus: "not_implemented";
+  /** Local snapshot/event persistence only — not durable server ACK. */
+  snapshotSyncStatus: "idle" | "syncing" | "synced" | "partial" | "error" | "not_started";
+  lastSyncedSequence: number | null;
+  pendingRecovery: boolean;
+  lastSuccessfulSyncAt: string | null;
   storageBytes: number;
   storageHealth: "ok" | "degraded" | "unavailable";
   dbPath: string | null;
-  phase: "registration-assignment";
+  phase: "snapshot-event-sync";
   browserRequired: false;
   claimRuntimeEnabled: false;
+  serverDurableAck: false;
 }
 
 export type ClientCommand =
