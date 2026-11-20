@@ -9,9 +9,15 @@ import {
 export const KEEPALIVE_REGISTER_PATH = "/api/v1/social-automation/client/keepalive/register";
 export const KEEPALIVE_ASSIGNMENTS_PATH = "/api/v1/social-automation/client/keepalive/assignments";
 export const KEEPALIVE_CAMPAIGNS_BASE = "/api/v1/social-automation/client/keepalive/campaigns";
+export const KEEPALIVE_EVENTS_ACK_PATH =
+  "/api/v1/social-automation/client/keepalive/events/ack";
+export const KEEPALIVE_ARTIFACTS_ACK_PATH =
+  "/api/v1/social-automation/client/keepalive/artifacts/ack";
 
 /** Default page size for event feed (bounded). */
 export const KEEPALIVE_EVENTS_PAGE_LIMIT = 100;
+/** Max event_ids per ACK batch (coalesce small batches, bound HTTP size). */
+export const KEEPALIVE_ACK_BATCH_LIMIT = 50;
 
 export type KeepAliveHttpResult<T> =
   | { ok: true; data: T; idempotent?: boolean }
@@ -92,6 +98,31 @@ export interface KeepAliveEventsResponse {
   hasMore: boolean;
   /** Server head hint only — not a local persistence proof. */
   eventSequenceHead: number | null;
+}
+
+export interface KeepAliveEventsAckResponse {
+  protocolVersion: string;
+  schemaVersion: number;
+  nodeId: string;
+  tenantId: string;
+  campaignId: string;
+  /** Server-confirmed contiguous ACK watermark. */
+  lastContiguousSequence: number;
+  ackedEventIds: string[];
+  idempotent: boolean;
+}
+
+export interface KeepAliveArtifactAckResponse {
+  protocolVersion: string;
+  schemaVersion: number;
+  nodeId: string;
+  tenantId: string;
+  campaignId: string;
+  jobId: string;
+  attempt: number;
+  storageKey: string;
+  acked: boolean;
+  idempotent: boolean;
 }
 
 /**
@@ -220,6 +251,78 @@ export class KeepAliveHttpApi {
     try {
       const res = await this.connection.requestWithAuth(path, "GET");
       return parseEventsResponse(res, params.nodeId, params.campaignId);
+    } catch (err) {
+      return mapHttpError(err);
+    }
+  }
+
+  /**
+   * Durable event delivery ACK — only after local SQLite ingest committed.
+   * Never ACKs across a gap; never Job claim/execute.
+   */
+  async ackEvents(params: {
+    nodeId: string;
+    campaignId: string;
+    assignmentGeneration: number;
+    eventIds: string[];
+    lastContiguousSequence: number;
+  }): Promise<KeepAliveHttpResult<KeepAliveEventsAckResponse>> {
+    if (!this.connection.isOnline()) {
+      return offlineResult("Client chưa online — không ACK events.");
+    }
+    if (params.eventIds.length === 0) {
+      return {
+        ok: false,
+        status: 0,
+        code: "empty_ack",
+        message: "Bỏ qua empty event ACK.",
+        fatal: false,
+      };
+    }
+    try {
+      const res = await this.connection.requestWithAuth(KEEPALIVE_EVENTS_ACK_PATH, "POST", {
+        node_id: params.nodeId,
+        campaign_id: params.campaignId,
+        assignment_generation: params.assignmentGeneration,
+        event_ids: params.eventIds,
+        last_contiguous_sequence: params.lastContiguousSequence,
+        protocol_version: KEEPALIVE_PROTOCOL_VERSION,
+        schema_version: KEEPALIVE_SCHEMA_VERSION,
+      });
+      return parseEventsAckResponse(res, params.nodeId, params.campaignId);
+    } catch (err) {
+      return mapHttpError(err);
+    }
+  }
+
+  /**
+   * Artifact delivery ACK (metadata only — no screenshot binary upload).
+   */
+  async ackArtifact(params: {
+    nodeId: string;
+    campaignId: string;
+    assignmentGeneration: number;
+    jobId: string;
+    attempt: number;
+    storageKey: string;
+    sha256: string;
+  }): Promise<KeepAliveHttpResult<KeepAliveArtifactAckResponse>> {
+    if (!this.connection.isOnline()) {
+      return offlineResult("Client chưa online — không ACK artifact.");
+    }
+    try {
+      const res = await this.connection.requestWithAuth(KEEPALIVE_ARTIFACTS_ACK_PATH, "POST", {
+        node_id: params.nodeId,
+        campaign_id: params.campaignId,
+        assignment_generation: params.assignmentGeneration,
+        job_id: params.jobId,
+        attempt: params.attempt,
+        storage_key: params.storageKey,
+        sha256: params.sha256,
+        protocol_version: KEEPALIVE_PROTOCOL_VERSION,
+        schema_version: KEEPALIVE_SCHEMA_VERSION,
+      });
+      return parseArtifactAckResponse(res, params.nodeId, params.campaignId);
     } catch (err) {
       return mapHttpError(err);
     }
@@ -595,6 +698,174 @@ export function parseEventsResponse(
   };
 }
 
+export function parseEventsAckResponse(
+  raw: Record<string, unknown>,
+  expectedNodeId: string,
+  expectedCampaignId: string
+): KeepAliveHttpResult<KeepAliveEventsAckResponse> {
+  const protocolVersion = str(raw.protocol_version) ?? str(raw.protocolVersion);
+  const schemaVersion = num(raw.schema_version) ?? num(raw.schemaVersion);
+  const nodeId = str(raw.node_id) ?? str(raw.nodeId) ?? expectedNodeId;
+  const tenantId = str(raw.tenant_id) ?? str(raw.tenantId) ?? "";
+  const campaignId =
+    str(raw.campaign_id) ?? str(raw.campaignId) ?? expectedCampaignId;
+  const lastContiguousSequence =
+    num(raw.last_contiguous_sequence) ??
+    num(raw.lastContiguousSequence) ??
+    num(raw.confirmed_sequence) ??
+    num(raw.acked_sequence);
+  const proto = checkProtocol(protocolVersion, schemaVersion);
+  if (!proto.ok) return proto;
+  if (nodeId !== expectedNodeId) {
+    return {
+      ok: false,
+      status: 422,
+      code: "node_id_mismatch",
+      message: "Event ACK node_id không khớp Keep Alive node cục bộ.",
+      fatal: true,
+    };
+  }
+  if (campaignId !== expectedCampaignId) {
+    return {
+      ok: false,
+      status: 422,
+      code: "campaign_id_mismatch",
+      message: "Event ACK campaign_id không khớp request.",
+      fatal: true,
+    };
+  }
+  const rejected =
+    raw.ok === false ||
+    str(raw.error) === "ack_beyond_head" ||
+    str(raw.error) === "ack_non_contiguous" ||
+    str(raw.code) === "ack_beyond_head" ||
+    str(raw.code) === "ack_non_contiguous";
+  if (rejected) {
+    const code = str(raw.code) ?? str(raw.error) ?? "ack_rejected";
+    return {
+      ok: false,
+      status: 409,
+      code,
+      message: str(raw.message) ?? `Event ACK rejected: ${code}`,
+      fatal: false,
+    };
+  }
+  if (lastContiguousSequence == null || lastContiguousSequence < 0) {
+    return {
+      ok: false,
+      status: 422,
+      code: "ack_sequence_missing",
+      message: "Event ACK thiếu last_contiguous_sequence.",
+      fatal: false,
+    };
+  }
+  const idsRaw = Array.isArray(raw.acked_event_ids)
+    ? raw.acked_event_ids
+    : Array.isArray(raw.event_ids)
+      ? raw.event_ids
+      : [];
+  const ackedEventIds = idsRaw
+    .map((v) => (typeof v === "string" ? v.trim() : ""))
+    .filter(Boolean);
+  const idempotent =
+    raw.idempotent === true || raw.already_acked === true || raw.duplicate === true;
+  return {
+    ok: true,
+    data: {
+      protocolVersion: protocolVersion!,
+      schemaVersion: schemaVersion!,
+      nodeId,
+      tenantId,
+      campaignId,
+      lastContiguousSequence,
+      ackedEventIds,
+      idempotent,
+    },
+  };
+}
+
+export function parseArtifactAckResponse(
+  raw: Record<string, unknown>,
+  expectedNodeId: string,
+  expectedCampaignId: string
+): KeepAliveHttpResult<KeepAliveArtifactAckResponse> {
+  const protocolVersion = str(raw.protocol_version) ?? str(raw.protocolVersion);
+  const schemaVersion = num(raw.schema_version) ?? num(raw.schemaVersion);
+  const nodeId = str(raw.node_id) ?? str(raw.nodeId) ?? expectedNodeId;
+  const tenantId = str(raw.tenant_id) ?? str(raw.tenantId) ?? "";
+  const campaignId =
+    str(raw.campaign_id) ?? str(raw.campaignId) ?? expectedCampaignId;
+  const jobId = str(raw.job_id) ?? str(raw.jobId) ?? "";
+  const attempt = num(raw.attempt) ?? 1;
+  const storageKey =
+    str(raw.storage_key) ?? str(raw.storageKey) ?? str(raw.storage_path) ?? "";
+  const proto = checkProtocol(protocolVersion, schemaVersion);
+  if (!proto.ok) return proto;
+  if (nodeId !== expectedNodeId) {
+    return {
+      ok: false,
+      status: 422,
+      code: "node_id_mismatch",
+      message: "Artifact ACK node_id không khớp Keep Alive node cục bộ.",
+      fatal: true,
+    };
+  }
+  if (campaignId !== expectedCampaignId) {
+    return {
+      ok: false,
+      status: 422,
+      code: "campaign_id_mismatch",
+      message: "Artifact ACK campaign_id không khớp request.",
+      fatal: true,
+    };
+  }
+  const code = str(raw.code) ?? str(raw.error);
+  if (
+    raw.ok === false ||
+    code === "artifact_not_ready" ||
+    code === "artifact_unsupported" ||
+    code === "checksum_mismatch" ||
+    code === "storage_key_mismatch"
+  ) {
+    return {
+      ok: false,
+      status: code === "artifact_not_ready" ? 409 : 422,
+      code: code ?? "artifact_ack_rejected",
+      message: str(raw.message) ?? `Artifact ACK rejected: ${code}`,
+      fatal: false,
+    };
+  }
+  const acked =
+    raw.acked === true ||
+    raw.ok === true ||
+    raw.already_acked === true ||
+    raw.idempotent === true;
+  if (!acked) {
+    return {
+      ok: false,
+      status: 422,
+      code: "artifact_ack_rejected",
+      message: str(raw.message) ?? "Artifact ACK không xác nhận.",
+      fatal: false,
+    };
+  }
+  return {
+    ok: true,
+    data: {
+      protocolVersion: protocolVersion!,
+      schemaVersion: schemaVersion!,
+      nodeId,
+      tenantId,
+      campaignId,
+      jobId,
+      attempt,
+      storageKey,
+      acked: true,
+      idempotent: raw.idempotent === true || raw.already_acked === true || raw.duplicate === true,
+    },
+  };
+}
+
 function checkProtocol(
   protocolVersion: string | null,
   schemaVersion: number | null
@@ -624,8 +895,11 @@ function mapHttpError(err: unknown): KeepAliveHttpResult<never> {
   if (err instanceof SeoOpsHttpError) {
     const status = err.diagnostic.status;
     const code = err.diagnostic.serverErrorCode || err.diagnostic.category;
+    const ackCursor =
+      code === "ack_beyond_head" || code === "ack_non_contiguous";
+    const artifactNotReady = code === "artifact_not_ready";
     const staleGen =
-      status === 409 ||
+      (!ackCursor && !artifactNotReady && status === 409) ||
       code === "assignment_generation_stale" ||
       code === "stale_assignment_generation";
     const fatal =
@@ -634,10 +908,14 @@ function mapHttpError(err: unknown): KeepAliveHttpResult<never> {
       code === "protocol_mismatch" ||
       code === "schema_mismatch" ||
       code === "keepalive_protocol_unsupported";
+    let mappedCode = code;
+    if (staleGen) mappedCode = "assignment_generation_stale";
+    else if (ackCursor) mappedCode = code;
+    else if (artifactNotReady) mappedCode = "artifact_not_ready";
     return {
       ok: false,
       status,
-      code: staleGen ? "assignment_generation_stale" : code,
+      code: mappedCode,
       message: sanitize(
         err.diagnostic.serverErrorMessage || err.message || `HTTP ${status}`
       ),

@@ -113,8 +113,8 @@ export function KeepAliveDiagnosticsPanel() {
     <div className="card keepalive-card">
       <div className="card-title">Keep Alive 24/7 Recovery Node</div>
       <div className="card-desc">
-        Register + assignments + snapshot/event ingestion (keepalive.v1). Không claim Job, không
-        Browser. Local persistence ≠ durable server ACK.
+        Register + assignments + snapshot/events + durable delivery ACK (keepalive.v1). Không claim
+        Job, không Browser. Local applied sequence ≠ server ACK sequence.
       </div>
 
       <div className="keepalive-toggle-row">
@@ -148,9 +148,36 @@ export function KeepAliveDiagnosticsPanel() {
           <div className="info-value">{snapshotLabel(diag?.snapshotSyncStatus)}</div>
         </div>
         <div className="info-item">
-          <div className="info-label">Last synced sequence</div>
+          <div className="info-label">Local applied sequence</div>
           <div className="info-value">
-            {diag?.lastSyncedSequence == null ? "—" : diag.lastSyncedSequence}
+            {diag?.lastSyncedSequence == null && diag?.lastAppliedSequence == null
+              ? "—"
+              : (diag?.lastSyncedSequence ?? diag?.lastAppliedSequence)}
+          </div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Server ACK sequence</div>
+          <div className="info-value">
+            {diag?.lastServerAckSequence == null ? "—" : diag.lastServerAckSequence}
+          </div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Pending ACK</div>
+          <div className="info-value">{diag?.pendingAckCount ?? "—"}</div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Last ACK success</div>
+          <div className="info-value">{formatTs(diag?.lastAckSuccessAt ?? null)}</div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Last ACK error</div>
+          <div className="info-value">{diag?.lastAckError || "—"}</div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Artifact ACK</div>
+          <div className="info-value">
+            {diag?.artifactAckState ?? "idle"}
+            {diag?.artifactAckPendingCount ? ` · pending ${diag.artifactAckPendingCount}` : ""}
           </div>
         </div>
         <div className="info-item">
@@ -177,7 +204,7 @@ export function KeepAliveDiagnosticsPanel() {
         </div>
         <div className="info-item">
           <div className="info-label">Server durable ACK</div>
-          <div className="info-value">Not implemented</div>
+          <div className="info-value">{diag?.serverDurableAck ? "Confirmed" : "None yet"}</div>
         </div>
         <div className="info-item">
           <div className="info-label">Last HTTP error</div>
@@ -212,7 +239,7 @@ export function KeepAliveDiagnosticsPanel() {
         </button>
         {diag?.storageReady ? (
           <span className="keepalive-storage-ready">
-            Storage ready · no Browser · claim OFF · ACK pending Phase 3B.5
+            Storage ready · no Browser · claim OFF · durable ACK on
           </span>
         ) : null}
       </div>

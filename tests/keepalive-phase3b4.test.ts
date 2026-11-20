@@ -279,9 +279,29 @@ test("event pagination, duplicates, out-of-order buffer, no progress events", as
 
 test("multiple campaigns + fencing conflict + generation stale 409", async () => {
   await withTempDir(async (dir) => {
-    const conn = createMockConnection(async (subpath, method) => {
+    const conn = createMockConnection(async (subpath, method, body) => {
       if (method === "POST" && subpath.endsWith("/register")) {
         return envelope({ node_id: "n1", tenant_id: "install-1", registered: true });
+      }
+      if (subpath.includes("/events/ack")) {
+        return envelope({
+          node_id: "n1",
+          tenant_id: "install-1",
+          campaign_id: body?.campaign_id,
+          last_contiguous_sequence: body?.last_contiguous_sequence ?? 0,
+          acked_event_ids: body?.event_ids ?? [],
+        });
+      }
+      if (subpath.includes("/artifacts/ack")) {
+        return envelope({
+          node_id: "n1",
+          tenant_id: "install-1",
+          campaign_id: body?.campaign_id,
+          job_id: body?.job_id,
+          attempt: body?.attempt,
+          storage_key: body?.storage_key,
+          acked: true,
+        });
       }
       if (subpath.includes("/assignments")) {
         return envelope({
@@ -336,8 +356,9 @@ test("multiple campaigns + fencing conflict + generation stale 409", async () =>
     await node.setEnabled(true);
     const diag = await node.getDiagnostics();
     assert.equal(diag.claimRuntimeEnabled, false);
-    assert.equal(diag.serverDurableAck, false);
     assert.equal(diag.browserRequired, false);
+    // c1 may ACK seq 1; c2 snapshot stale — durable ACK capability may be true for c1 only
+    assert.equal(typeof diag.serverDurableAck, "boolean");
     assert.ok(diag.assignedCampaignCount >= 1);
     assert.equal(node.sqlite.getJobState("install-1", "c1", "job-1")?.fencingGeneration, 2);
     assert.equal(node.sqlite.getJournalEvent("e-2")?.applyStatus, "rejected_stale");
@@ -349,9 +370,28 @@ test("multiple campaigns + fencing conflict + generation stale 409", async () =>
 test("unauthorized before assignment; network failure; browser stopped; claim OFF", async () => {
   await withTempDir(async (dir) => {
     let failEvents = false;
-    const conn = createMockConnection(async (subpath, method) => {
+    const conn = createMockConnection(async (subpath, method, body) => {
       if (method === "POST" && subpath.endsWith("/register")) {
         return envelope({ node_id: "n1", tenant_id: "install-1", registered: true });
+      }
+      if (subpath.includes("/events/ack")) {
+        return envelope({
+          node_id: "n1",
+          tenant_id: "install-1",
+          campaign_id: body?.campaign_id,
+          last_contiguous_sequence: body?.last_contiguous_sequence ?? 0,
+          acked_event_ids: body?.event_ids ?? [],
+        });
+      }
+      if (subpath.includes("/artifacts/ack")) {
+        return envelope({
+          node_id: "n1",
+          campaign_id: body?.campaign_id,
+          acked: true,
+          job_id: body?.job_id,
+          attempt: body?.attempt,
+          storage_key: body?.storage_key,
+        });
       }
       if (subpath.includes("/assignments")) {
         return envelope({
@@ -483,6 +523,6 @@ test("wiring contract: snapshot/events paths + claim remains opt-in", async () =
   assert.match(sync, /syncAllAssignedCampaignData/);
   assert.match(main, /RPA_CAMPAIGN_CLAIM/);
   assert.match(panel, /Pending recovery/);
-  assert.match(panel, /Last synced sequence/);
+  assert.match(panel, /Local applied sequence|Server ACK sequence/);
   assert.doesNotMatch(panel, /claimCampaign/i);
 });

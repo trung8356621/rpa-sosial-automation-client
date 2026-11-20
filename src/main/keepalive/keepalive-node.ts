@@ -150,10 +150,17 @@ export class KeepAliveNodeService {
       storageBytes: stats.storageBytes,
       storageHealth: stats.storageHealth,
       dbPath: stats.dbPath,
-      phase: "snapshot-event-sync",
+      phase: "durable-ack",
       browserRequired: false,
       claimRuntimeEnabled: false,
-      serverDurableAck: false,
+      serverDurableAck: sync?.serverDurableAck === true,
+      lastServerAckSequence:
+        sync?.lastServerAckSequence ?? this.store.maxServerAckSequence(this.nodeId),
+      pendingAckCount: sync?.pendingAckCount ?? stats.pendingSyncCount,
+      lastAckSuccessAt: sync?.lastAckSuccessAt ?? null,
+      lastAckError: sync?.lastAckError ?? null,
+      artifactAckState: sync?.artifactAckState ?? "idle",
+      artifactAckPendingCount: sync?.artifactAckPendingCount ?? 0,
     };
   }
 

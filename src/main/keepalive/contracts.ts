@@ -1,6 +1,6 @@
 /**
- * Keep Alive 24/7 durable sync contracts (CLIENT local-first, Phase 2).
- * No Server ACK / claim / execute semantics.
+ * Keep Alive 24/7 durable sync contracts (CLIENT local-first).
+ * Phase 3B.5B: durable Event/Artifact delivery ACK (not Job claim/execute).
  */
 
 export const KEEPALIVE_SCHEMA_VERSION = 2;
@@ -29,9 +29,25 @@ export type JournalApplyStatus =
   | "rejected_unauthorized"
   | "rejected_invalid";
 
-export type JournalSyncStatus = "pending" | "ack_local";
+/** pending = locally applied, awaiting server delivery ACK; server_acked = server confirmed. */
+export type JournalSyncStatus = "pending" | "ack_local" | "server_acked";
 
-export type ScreenshotUploadStatus = "pending" | "uploaded" | "ack_local" | "failed";
+export type ScreenshotUploadStatus =
+  | "pending"
+  | "uploaded"
+  | "ack_local"
+  | "server_acked"
+  | "failed"
+  | "unsupported";
+
+export type ArtifactAckState =
+  | "idle"
+  | "pending"
+  | "acked"
+  | "not_ready"
+  | "unsupported"
+  | "mismatch"
+  | "error";
 
 /** Keys forbidden in Campaign snapshot metadata (secrets / browser identity). */
 export const SENSITIVE_SNAPSHOT_KEYS = [
@@ -172,7 +188,10 @@ export interface RecoveryRequest {
   campaignId: string;
   fromSequence?: number;
   toSequence?: number;
-  /** Prepared locally only — Phase 2 does not send these. */
+  /**
+   * When true, entry is a recovery-plan marker.
+   * Phase 3B.5B sends durable ACKs after SQLite commit (not via this flag alone).
+   */
   preparedOnly: true;
 }
 
@@ -229,11 +248,21 @@ export interface KeepAliveDiagnosticsV2 {
   storageBytes: number;
   storageHealth: StorageHealth;
   dbPath: string | null;
-  phase: "snapshot-event-sync";
+  phase: "durable-ack";
   browserRequired: false;
   claimRuntimeEnabled: false;
-  /** Explicit: local persistence ≠ durable server ACK. */
-  serverDurableAck: false;
+  /**
+   * True only when Client has confirmed at least one server delivery ACK.
+   * Local persistence alone never sets this.
+   */
+  serverDurableAck: boolean;
+  /** Max server-confirmed ACK sequence (separate from lastAppliedSequence). */
+  lastServerAckSequence: number | null;
+  pendingAckCount: number;
+  lastAckSuccessAt: string | null;
+  lastAckError: string | null;
+  artifactAckState: ArtifactAckState;
+  artifactAckPendingCount: number;
 }
 
 export type SnapshotUpsertResult =

@@ -181,10 +181,24 @@ export interface KeepAliveDiagnostics {
   storageBytes: number;
   storageHealth: "ok" | "degraded" | "unavailable";
   dbPath: string | null;
-  phase: "snapshot-event-sync";
+  phase: "durable-ack";
   browserRequired: false;
   claimRuntimeEnabled: false;
-  serverDurableAck: false;
+  /** True only after server-confirmed delivery ACK (never from local persist alone). */
+  serverDurableAck: boolean;
+  lastServerAckSequence: number | null;
+  pendingAckCount: number;
+  lastAckSuccessAt: string | null;
+  lastAckError: string | null;
+  artifactAckState:
+    | "idle"
+    | "pending"
+    | "acked"
+    | "not_ready"
+    | "unsupported"
+    | "mismatch"
+    | "error";
+  artifactAckPendingCount: number;
 }
 
 export type ClientCommand =

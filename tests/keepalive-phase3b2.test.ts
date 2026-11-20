@@ -186,7 +186,7 @@ test("registration success then assignments applied without Browser", async () =
   await withTempDir(async (dir) => {
     let registerCalls = 0;
     const conn = createMockConnection({
-      handler: async (subpath, method) => {
+      handler: async (subpath, method, body) => {
         if (method === "POST" && subpath.endsWith("/keepalive/register")) {
           registerCalls += 1;
           return envelope({
@@ -203,6 +203,52 @@ test("registration success then assignments applied without Browser", async () =
               { campaign_id: "camp-1", assignment_generation: 3, row_version: 9 },
               { campaign_id: "camp-2", assignment_generation: 1, row_version: 1 },
             ],
+          });
+        }
+        if (subpath.includes("/events/ack")) {
+          return envelope({
+            node_id: "fixed-node",
+            tenant_id: "tenant-a",
+            campaign_id: body?.campaign_id,
+            last_contiguous_sequence: body?.last_contiguous_sequence ?? 0,
+            acked_event_ids: body?.event_ids ?? [],
+          });
+        }
+        if (subpath.includes("/artifacts/ack")) {
+          return envelope({
+            node_id: "fixed-node",
+            tenant_id: "tenant-a",
+            campaign_id: body?.campaign_id,
+            job_id: body?.job_id,
+            attempt: body?.attempt,
+            storage_key: body?.storage_key,
+            acked: true,
+          });
+        }
+        if (subpath.includes("/snapshot")) {
+          const camp = subpath.includes("camp-2") ? "camp-2" : "camp-1";
+          return envelope({
+            node_id: "fixed-node",
+            tenant_id: "tenant-a",
+            campaign_id: camp,
+            assignment_generation: camp === "camp-1" ? 3 : 1,
+            snapshot_version: 1,
+            sequence: 0,
+            event_sequence_head: 0,
+            row_version: 1,
+            metadata: { name: camp },
+          });
+        }
+        if (subpath.includes("/events")) {
+          const camp = subpath.includes("camp-2") ? "camp-2" : "camp-1";
+          return envelope({
+            node_id: "fixed-node",
+            tenant_id: "tenant-a",
+            campaign_id: camp,
+            assignment_generation: camp === "camp-1" ? 3 : 1,
+            events: [],
+            has_more: false,
+            event_sequence_head: 0,
           });
         }
         throw new Error(`unexpected ${method} ${subpath}`);

@@ -18,6 +18,9 @@ export interface CampaignCursorRow {
   campaignId: string;
   lastAppliedSequence: number;
   lastSeenSequence: number;
+  /** Server-confirmed delivery ACK watermark — never inferred from local apply. */
+  lastServerAckSequence: number;
+  lastServerAckAt: string | null;
   updatedAt: string;
 }
 
@@ -220,6 +223,8 @@ export class KeepAliveSqliteStore {
         campaign_id TEXT NOT NULL,
         last_applied_sequence INTEGER NOT NULL DEFAULT 0,
         last_seen_sequence INTEGER NOT NULL DEFAULT 0,
+        last_server_ack_sequence INTEGER NOT NULL DEFAULT 0,
+        last_server_ack_at TEXT,
         updated_at TEXT NOT NULL,
         PRIMARY KEY (tenant_id, campaign_id)
       );
@@ -262,6 +267,8 @@ export class KeepAliveSqliteStore {
       );
     `);
     this.ensureColumn("campaign_assignments", "row_version", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("campaign_cursors", "last_server_ack_sequence", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("campaign_cursors", "last_server_ack_at", "TEXT");
   }
 
   private ensureColumn(table: string, column: string, ddlType: string): void {
@@ -492,6 +499,70 @@ export class KeepAliveSqliteStore {
       .run(applyStatus, eventId);
   }
 
+  updateJournalSyncStatus(eventId: string, syncStatus: JournalSyncStatus): void {
+    this.requireDb()
+      .prepare(`UPDATE job_execution_journal SET sync_status = ? WHERE event_id = ?`)
+      .run(syncStatus, eventId);
+  }
+
+  markJournalEventsServerAcked(eventIds: string[]): void {
+    if (eventIds.length === 0) return;
+    const stmt = this.requireDb().prepare(
+      `UPDATE job_execution_journal SET sync_status = 'server_acked' WHERE event_id = ?`
+    );
+    for (const id of eventIds) {
+      stmt.run(id);
+    }
+  }
+
+  /**
+   * Applied events awaiting server delivery ACK, ordered by sequence.
+   * Contiguous batch selection happens in ack-engine (never across gaps).
+   */
+  listAppliedPendingAckEvents(
+    tenantId: string,
+    campaignId: string,
+    afterSequence: number,
+    upToSequence: number,
+    limit = 50
+  ): JobJournalEventRecord[] {
+    return this.requireDb()
+      .prepare(
+        `SELECT event_id AS eventId, tenant_id AS tenantId, campaign_id AS campaignId,
+                job_id AS jobId, attempt, fencing_generation AS fencingGeneration,
+                event_sequence AS eventSequence, event_type AS eventType,
+                timestamp, payload_version AS payloadVersion, payload_json AS payloadJson,
+                sync_status AS syncStatus, apply_status AS applyStatus, created_at AS createdAt
+         FROM job_execution_journal
+         WHERE tenant_id = ? AND campaign_id = ?
+           AND apply_status = 'applied'
+           AND sync_status = 'pending'
+           AND event_sequence > ? AND event_sequence <= ?
+         ORDER BY event_sequence ASC
+         LIMIT ?`
+      )
+      .all(tenantId, campaignId, afterSequence, upToSequence, limit) as unknown as JobJournalEventRecord[];
+  }
+
+  maxServerAckSequence(nodeId: string | null): number | null {
+    if (!nodeId) {
+      const row = this.requireDb()
+        .prepare(`SELECT MAX(COALESCE(last_server_ack_sequence, 0)) AS m FROM campaign_cursors`)
+        .get() as { m: number | null };
+      return row.m == null || Number(row.m) === 0 ? null : Number(row.m);
+    }
+    const row = this.requireDb()
+      .prepare(
+        `SELECT MAX(COALESCE(c.last_server_ack_sequence, 0)) AS m
+         FROM campaign_cursors c
+         INNER JOIN campaign_assignments a
+           ON a.tenant_id = c.tenant_id AND a.campaign_id = c.campaign_id
+         WHERE a.node_id = ? AND a.status = 'assigned'`
+      )
+      .get(nodeId) as { m: number | null };
+    return row.m == null || Number(row.m) === 0 ? null : Number(row.m);
+  }
+
   listJournalSequences(tenantId: string, campaignId: string): number[] {
     const rows = this.requireDb()
       .prepare(
@@ -516,6 +587,26 @@ export class KeepAliveSqliteStore {
          ORDER BY event_sequence ASC`
       )
       .all(tenantId, campaignId) as unknown as JobJournalEventRecord[];
+  }
+
+  listAppliedEventsByType(
+    tenantId: string,
+    campaignId: string,
+    eventType: string
+  ): JobJournalEventRecord[] {
+    return this.requireDb()
+      .prepare(
+        `SELECT event_id AS eventId, tenant_id AS tenantId, campaign_id AS campaignId,
+                job_id AS jobId, attempt, fencing_generation AS fencingGeneration,
+                event_sequence AS eventSequence, event_type AS eventType,
+                timestamp, payload_version AS payloadVersion, payload_json AS payloadJson,
+                sync_status AS syncStatus, apply_status AS applyStatus, created_at AS createdAt
+         FROM job_execution_journal
+         WHERE tenant_id = ? AND campaign_id = ?
+           AND event_type = ? AND apply_status = 'applied'
+         ORDER BY event_sequence ASC`
+      )
+      .all(tenantId, campaignId, eventType) as unknown as JobJournalEventRecord[];
   }
 
   listPendingSyncEvents(tenantId?: string, campaignId?: string): JobJournalEventRecord[] {
@@ -552,25 +643,77 @@ export class KeepAliveSqliteStore {
       .prepare(
         `SELECT tenant_id AS tenantId, campaign_id AS campaignId,
                 last_applied_sequence AS lastAppliedSequence,
-                last_seen_sequence AS lastSeenSequence, updated_at AS updatedAt
+                last_seen_sequence AS lastSeenSequence,
+                COALESCE(last_server_ack_sequence, 0) AS lastServerAckSequence,
+                last_server_ack_at AS lastServerAckAt,
+                updated_at AS updatedAt
          FROM campaign_cursors WHERE tenant_id = ? AND campaign_id = ?`
       )
       .get(tenantId, campaignId) as CampaignCursorRow | undefined;
     return row ?? null;
   }
 
-  upsertCursor(row: CampaignCursorRow): void {
+  upsertCursor(
+    row: Omit<CampaignCursorRow, "lastServerAckSequence" | "lastServerAckAt"> & {
+      lastServerAckSequence?: number;
+      lastServerAckAt?: string | null;
+    }
+  ): void {
+    const existing = this.getCursor(row.tenantId, row.campaignId);
+    const lastServerAckSequence =
+      row.lastServerAckSequence ?? existing?.lastServerAckSequence ?? 0;
+    const lastServerAckAt =
+      row.lastServerAckAt !== undefined ? row.lastServerAckAt : (existing?.lastServerAckAt ?? null);
     this.requireDb()
       .prepare(
         `INSERT INTO campaign_cursors
-          (tenant_id, campaign_id, last_applied_sequence, last_seen_sequence, updated_at)
-         VALUES (?, ?, ?, ?, ?)
+          (tenant_id, campaign_id, last_applied_sequence, last_seen_sequence,
+           last_server_ack_sequence, last_server_ack_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(tenant_id, campaign_id) DO UPDATE SET
            last_applied_sequence = excluded.last_applied_sequence,
            last_seen_sequence = excluded.last_seen_sequence,
+           last_server_ack_sequence = excluded.last_server_ack_sequence,
+           last_server_ack_at = excluded.last_server_ack_at,
            updated_at = excluded.updated_at`
       )
-      .run(row.tenantId, row.campaignId, row.lastAppliedSequence, row.lastSeenSequence, row.updatedAt);
+      .run(
+        row.tenantId,
+        row.campaignId,
+        row.lastAppliedSequence,
+        row.lastSeenSequence,
+        lastServerAckSequence,
+        lastServerAckAt,
+        row.updatedAt
+      );
+  }
+
+  /** Advance server ACK cursor only after successful HTTP ACK (never from local apply). */
+  advanceServerAckCursor(params: {
+    tenantId: string;
+    campaignId: string;
+    lastServerAckSequence: number;
+    atIso?: string;
+  }): void {
+    const cursor = this.getCursor(params.tenantId, params.campaignId);
+    const lastApplied = cursor?.lastAppliedSequence ?? 0;
+    const lastSeen = cursor?.lastSeenSequence ?? 0;
+    const prevAck = cursor?.lastServerAckSequence ?? 0;
+    if (params.lastServerAckSequence < prevAck) return;
+    if (params.lastServerAckSequence > lastApplied) {
+      // Never confirm ACK beyond locally applied contiguous watermark.
+      return;
+    }
+    const at = params.atIso ?? new Date().toISOString();
+    this.upsertCursor({
+      tenantId: params.tenantId,
+      campaignId: params.campaignId,
+      lastAppliedSequence: lastApplied,
+      lastSeenSequence: lastSeen,
+      lastServerAckSequence: params.lastServerAckSequence,
+      lastServerAckAt: at,
+      updatedAt: at,
+    });
   }
 
   getJobState(tenantId: string, campaignId: string, jobId: string): JobAppliedStateRow | null {
@@ -669,7 +812,27 @@ export class KeepAliveSqliteStore {
                 created_at AS createdAt, updated_at AS updatedAt
          FROM screenshot_metadata
          WHERE tenant_id = ? AND campaign_id = ?
-           AND (server_ack_at IS NULL OR upload_status IN ('pending', 'uploaded', 'failed'))
+           AND server_ack_at IS NULL
+           AND upload_status IN ('pending', 'uploaded', 'failed')
+         ORDER BY created_at ASC`
+      )
+      .all(tenantId, campaignId) as unknown as ScreenshotMetadataRecord[];
+  }
+
+  /** Artifacts ready for delivery ACK (have authoritative storage_key + sha256). */
+  listPendingArtifactAcks(tenantId: string, campaignId: string): ScreenshotMetadataRecord[] {
+    return this.requireDb()
+      .prepare(
+        `SELECT id, tenant_id AS tenantId, campaign_id AS campaignId, job_id AS jobId,
+                attempt, storage_key AS storageKey, sha256,
+                upload_status AS uploadStatus, server_ack_at AS serverAckAt,
+                created_at AS createdAt, updated_at AS updatedAt
+         FROM screenshot_metadata
+         WHERE tenant_id = ? AND campaign_id = ?
+           AND server_ack_at IS NULL
+           AND storage_key IS NOT NULL AND TRIM(storage_key) != ''
+           AND sha256 IS NOT NULL AND TRIM(sha256) != ''
+           AND upload_status NOT IN ('server_acked', 'unsupported')
          ORDER BY created_at ASC`
       )
       .all(tenantId, campaignId) as unknown as ScreenshotMetadataRecord[];

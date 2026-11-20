@@ -1,9 +1,11 @@
 import type { ClientConnection } from "../connection/client-connection.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
 import type {
+  ArtifactAckState,
   KeepAliveRegistrationStatus,
   KeepAliveSnapshotSyncStatus,
 } from "./contracts.js";
+import { flushDurableAcks } from "./ack-engine.js";
 import { applyServerAssignments, revokeAllActiveAssignments } from "./assignment-apply.js";
 import { syncAllAssignedCampaignData } from "./campaign-data-sync.js";
 import { KeepAliveHttpApi } from "./keepalive-http-api.js";
@@ -28,7 +30,14 @@ export interface KeepAliveSyncState {
   pendingRecovery: boolean;
   lastSuccessfulSyncAt: string | null;
   detectedGapCount: number;
-  serverDurableAck: false;
+  /** True only after at least one server-confirmed delivery ACK. */
+  serverDurableAck: boolean;
+  lastServerAckSequence: number | null;
+  pendingAckCount: number;
+  lastAckSuccessAt: string | null;
+  lastAckError: string | null;
+  artifactAckState: ArtifactAckState;
+  artifactAckPendingCount: number;
 }
 
 /**
@@ -54,6 +63,13 @@ export class KeepAliveSyncService {
   private pendingRecovery = false;
   private lastSuccessfulSyncAt: string | null = null;
   private detectedGapCount = 0;
+  private serverDurableAck = false;
+  private lastServerAckSequence: number | null = null;
+  private pendingAckCount = 0;
+  private lastAckSuccessAt: string | null = null;
+  private lastAckError: string | null = null;
+  private artifactAckState: ArtifactAckState = "idle";
+  private artifactAckPendingCount = 0;
 
   constructor(
     private readonly connection: ClientConnection,
@@ -94,7 +110,13 @@ export class KeepAliveSyncService {
       pendingRecovery: this.pendingRecovery,
       lastSuccessfulSyncAt: this.lastSuccessfulSyncAt,
       detectedGapCount: this.detectedGapCount,
-      serverDurableAck: false,
+      serverDurableAck: this.serverDurableAck,
+      lastServerAckSequence: this.lastServerAckSequence,
+      pendingAckCount: this.pendingAckCount,
+      lastAckSuccessAt: this.lastAckSuccessAt,
+      lastAckError: this.lastAckError,
+      artifactAckState: this.artifactAckState,
+      artifactAckPendingCount: this.artifactAckPendingCount,
     };
   }
 
@@ -110,6 +132,8 @@ export class KeepAliveSyncService {
       this.snapshotSyncStatus = "idle";
       this.lastSyncedSequence = null;
       this.pendingRecovery = false;
+      this.lastAckError = null;
+      this.artifactAckState = "idle";
       const nodeId = this.node.getNodeId();
       if (nodeId) {
         const revoked = revokeAllActiveAssignments(this.node.sqlite, nodeId);
@@ -334,13 +358,71 @@ export class KeepAliveSyncService {
       lastSyncedSequence: dataSummary.lastSyncedSequence,
       pendingRecovery: dataSummary.pendingRecovery,
       detectedGapCount: dataSummary.detectedGapCount,
-      serverDurableAck: false,
       claimRuntimeEnabled: false,
     });
 
-    if (dataSummary.needsAssignmentRefresh && reason !== "stale_generation") {
+    // Durable delivery ACK after SQLite ingest — same sync loop, no extra poller.
+    if (!dataSummary.outcomes.some((o) => o.authFatal)) {
+      const ackSummary = await flushDurableAcks(this.api, this.node.sqlite, {
+        nodeId,
+        tenantId: assign.data.tenantId,
+      });
+      this.pendingAckCount = ackSummary.pendingAckCount;
+      this.artifactAckPendingCount = ackSummary.artifactAckPendingCount;
+      this.artifactAckState = ackSummary.artifactAckState;
+      this.lastServerAckSequence = ackSummary.lastServerAckSequence;
+      if (ackSummary.serverDurableAck) this.serverDurableAck = true;
+      if (ackSummary.lastAckSuccessAt) this.lastAckSuccessAt = ackSummary.lastAckSuccessAt;
+      if (ackSummary.lastAckError) {
+        this.lastAckError = ackSummary.lastAckError;
+        this.lastHttpError = ackSummary.lastAckError;
+      } else {
+        this.lastAckError = null;
+      }
+
+      logClientEvent("KEEPALIVE_DURABLE_ACK_FLUSHED", {
+        reason,
+        nodeId,
+        eventsCampaigns: ackSummary.outcomes.length,
+        pendingAckCount: ackSummary.pendingAckCount,
+        lastServerAckSequence: ackSummary.lastServerAckSequence,
+        serverDurableAck: this.serverDurableAck,
+        artifactAckState: ackSummary.artifactAckState,
+      });
+
+      if (ackSummary.authFatal) {
+        this.stoppedFatal = true;
+        this.registrationStatus = "auth_blocked";
+        this.stopPeriodic();
+        revokeAllActiveAssignments(this.node.sqlite, nodeId);
+        return;
+      }
+
+      if (
+        ackSummary.lastAckError &&
+        !ackSummary.needsFeedRefresh &&
+        !ackSummary.needsAssignmentRefresh
+      ) {
+        // Transient ACK failure — bounded backoff on existing sync loop.
+        this.scheduleRetry();
+      }
+
+      if (
+        (ackSummary.needsAssignmentRefresh || dataSummary.needsAssignmentRefresh) &&
+        reason !== "stale_generation"
+      ) {
+        logClientEvent("KEEPALIVE_ASSIGNMENT_GENERATION_STALE_REFRESH", { reason, nodeId });
+        queueMicrotask(() => {
+          void this.sync("stale_generation");
+        });
+      } else if (ackSummary.needsFeedRefresh && reason !== "ack_reconcile") {
+        // Reconcile cursors via one feed refresh — do not advance confirmed ACK.
+        queueMicrotask(() => {
+          void this.sync("ack_reconcile");
+        });
+      }
+    } else if (dataSummary.needsAssignmentRefresh && reason !== "stale_generation") {
       logClientEvent("KEEPALIVE_ASSIGNMENT_GENERATION_STALE_REFRESH", { reason, nodeId });
-      // Single follow-up assignment refresh — avoid loops.
       queueMicrotask(() => {
         void this.sync("stale_generation");
       });

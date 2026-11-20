@@ -76,7 +76,7 @@ test("Keep Alive initializes without Browser Profile infrastructure", async () =
     assert.equal(diag.storageReady, true);
     assert.equal(diag.browserRequired, false);
     assert.equal(diag.claimRuntimeEnabled, false);
-    assert.equal(diag.phase, "snapshot-event-sync");
+    assert.equal(diag.phase, "durable-ack");
     assert.equal(diag.serverDurableAck, false);
     assert.ok(
       diag.snapshotSyncStatus === "not_started" ||
@@ -121,5 +121,6 @@ test("wiring contract: Keep Alive IPC and UI present; claim remains opt-in", asy
   assert.match(panel, /Pending recovery/);
   assert.match(panel, /Storage health/);
   assert.doesNotMatch(panel, /claimCampaign|ackCampaign/i);
-  assert.match(panel, /Local persistence ≠ durable server ACK|server ACK/i);
+  assert.match(panel, /server ACK/i);
+  assert.match(panel, /Local applied sequence|Server ACK sequence/i);
 });
