@@ -180,6 +180,71 @@ test("parse assignments empty / multiple + tenant isolation", () => {
   );
   assert.equal(cross.ok, false);
   if (!cross.ok) assert.equal(cross.code, "tenant_mismatch");
+
+  // LIVE VPS response shape: node-level assignment_generation + legacy version alias
+  const liveShape = parseAssignmentsResponse(
+    {
+      ok: true,
+      protocol_version: "keepalive.v1",
+      schema_version: 2,
+      node_id: "ka-node-mwosxyzh-dczwdgee",
+      tenant_id: "ins_4Zn6M7cHZIQI2UbS",
+      assignment_generation: 1,
+      assignments: [
+        {
+          campaign_id: "cf0d8be1-5475-4c84-a788-600a6a8ae17f",
+          campaign_uuid: "cf0d8be1-5475-4c84-a788-600a6a8ae17f",
+          name: "test wp 3",
+          status: "running",
+          platform: "mayhopphat",
+          row_version: 1,
+          version: 1,
+          assigned_at: "2026-11-20T10:00:16+00:00",
+        },
+      ],
+    },
+    "ka-node-mwosxyzh-dczwdgee"
+  );
+  assert.equal(liveShape.ok, true);
+  if (liveShape.ok) {
+    assert.equal(liveShape.data.assignments.length, 1);
+    assert.deepEqual(liveShape.data.assignments[0], {
+      campaignId: "cf0d8be1-5475-4c84-a788-600a6a8ae17f",
+      assignmentGeneration: 1,
+      rowVersion: 1,
+      status: "assigned",
+    });
+  }
+
+  // Legacy version alias when row_version is omitted; reject when assignment_generation missing everywhere
+  const legacyAlias = parseAssignmentsResponse(
+    envelope({
+      node_id: "n1",
+      tenant_id: "t1",
+      assignment_generation: 2,
+      assignments: [{ campaign_id: "c-legacy", version: 7 }],
+    }),
+    "n1"
+  );
+  assert.equal(legacyAlias.ok, true);
+  if (legacyAlias.ok) {
+    assert.deepEqual(legacyAlias.data.assignments, [
+      { campaignId: "c-legacy", assignmentGeneration: 2, rowVersion: 7, status: "assigned" },
+    ]);
+  }
+
+  const missingGen = parseAssignmentsResponse(
+    envelope({
+      node_id: "n1",
+      tenant_id: "t1",
+      assignments: [{ campaign_id: "c-no-gen", row_version: 1 }],
+    }),
+    "n1"
+  );
+  assert.equal(missingGen.ok, true);
+  if (missingGen.ok) {
+    assert.equal(missingGen.data.assignments.length, 0);
+  }
 });
 
 test("registration success then assignments applied without Browser", async () => {

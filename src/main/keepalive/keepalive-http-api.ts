@@ -413,6 +413,8 @@ export function parseRegisterResponse(
   const schemaVersion = num(raw.schema_version) ?? num(raw.schemaVersion);
   const nodeId = str(raw.node_id) ?? str(raw.nodeId) ?? expectedNodeId;
   const tenantId = str(raw.tenant_id) ?? str(raw.tenantId);
+  const envelopeAssignmentGeneration =
+    num(raw.assignment_generation) ?? num(raw.assignmentGeneration);
 
   const proto = checkProtocol(protocolVersion, schemaVersion);
   if (!proto.ok) return proto;
@@ -463,6 +465,8 @@ export function parseAssignmentsResponse(
   const schemaVersion = num(raw.schema_version) ?? num(raw.schemaVersion);
   const nodeId = str(raw.node_id) ?? str(raw.nodeId) ?? expectedNodeId;
   const tenantId = str(raw.tenant_id) ?? str(raw.tenantId);
+  const envelopeAssignmentGeneration =
+    num(raw.assignment_generation) ?? num(raw.assignmentGeneration);
 
   const proto = checkProtocol(protocolVersion, schemaVersion);
   if (!proto.ok) return proto;
@@ -495,10 +499,13 @@ export function parseAssignmentsResponse(
   for (const item of listRaw) {
     if (!item || typeof item !== "object") continue;
     const row = item as Record<string, unknown>;
-    const campaignId = str(row.campaign_id) ?? str(row.campaignId);
+    const campaignId = str(row.campaign_id) ?? str(row.campaignId) ?? str(row.campaign_uuid);
     const assignmentGeneration =
-      num(row.assignment_generation) ?? num(row.assignmentGeneration);
-    const rowVersion = num(row.row_version) ?? num(row.rowVersion) ?? 0;
+      num(row.assignment_generation) ??
+      num(row.assignmentGeneration) ??
+      envelopeAssignmentGeneration;
+    const rowVersion =
+      num(row.row_version) ?? num(row.rowVersion) ?? num(row.version) ?? 0;
     if (!campaignId || assignmentGeneration == null || assignmentGeneration < 1) {
       continue;
     }
@@ -543,6 +550,8 @@ export function parseSnapshotResponse(
   const schemaVersion = num(raw.schema_version) ?? num(raw.schemaVersion);
   const nodeId = str(raw.node_id) ?? str(raw.nodeId) ?? expectedNodeId;
   const tenantId = str(raw.tenant_id) ?? str(raw.tenantId);
+  const envelopeAssignmentGeneration =
+    num(raw.assignment_generation) ?? num(raw.assignmentGeneration);
   const campaignId =
     str(raw.campaign_id) ?? str(raw.campaignId) ?? expectedCampaignId;
   const assignmentGeneration =
@@ -642,6 +651,8 @@ export function parseEventsResponse(
   const schemaVersion = num(raw.schema_version) ?? num(raw.schemaVersion);
   const nodeId = str(raw.node_id) ?? str(raw.nodeId) ?? expectedNodeId;
   const tenantId = str(raw.tenant_id) ?? str(raw.tenantId);
+  const envelopeAssignmentGeneration =
+    num(raw.assignment_generation) ?? num(raw.assignmentGeneration);
   const campaignId =
     str(raw.campaign_id) ?? str(raw.campaignId) ?? expectedCampaignId;
   const assignmentGeneration =
