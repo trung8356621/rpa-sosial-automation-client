@@ -1,34 +1,35 @@
 import type { ClientStore } from "../storage/store.js";
 import { logClientEvent } from "../main-error-log.js";
-import {
-  KeepAliveSqliteStore,
-  type JobJournalEvent,
-  type ScreenshotMetadataRow,
-} from "./keepalive-sqlite.js";
+import type {
+  CampaignSnapshotInput,
+  JobJournalEventInput,
+  KeepAliveDiagnosticsV2,
+  RecoveryPlan,
+  ScreenshotMetadataInput,
+  ScreenshotMetadataRecord,
+  SnapshotUpsertResult,
+  JournalIngestResult,
+  CampaignAssignment,
+} from "./contracts.js";
+import { KeepAliveSqliteStore } from "./keepalive-sqlite.js";
+import { upsertCampaignSnapshot } from "./snapshot-engine.js";
+import { ingestJobEvent } from "./journal-engine.js";
+import { prepareRecovery } from "./recovery-engine.js";
 
-export interface KeepAliveDiagnostics {
-  enabled: boolean;
-  storageReady: boolean;
-  campaignCount: number;
-  jobCount: number;
-  pendingSyncCount: number;
-  lastSyncAt: string | null;
-  storageBytes: number;
-  dbPath: string | null;
-  /** Phase 1: local recovery node only — no claim/ACK/execute. */
-  phase: "local-poc";
-  browserRequired: false;
-}
+/** @deprecated Phase 1 alias — prefer KeepAliveDiagnosticsV2 */
+export type KeepAliveDiagnostics = KeepAliveDiagnosticsV2;
 
 /**
- * Keep Alive 24/7 Recovery Node — Phase 1 local POC.
+ * Keep Alive 24/7 Recovery Node — Phase 2 durable local sync engine.
  *
- * Initializes durable SQLite and settings without opening a Browser Profile.
- * Does not claim Campaigns, ACK Server, or touch Browser cookies / identity.
+ * Initializes SQLite without Browser Profile.
+ * Does not claim Campaigns, ACK Server, execute Jobs, or touch cookies/identity.
  */
 export class KeepAliveNodeService {
   private readonly store: KeepAliveSqliteStore;
   private initialized = false;
+  private nodeId: string | null = null;
+  private lastRecoveryPlan: RecoveryPlan | null = null;
 
   constructor(
     private readonly userDataPath: string,
@@ -46,18 +47,39 @@ export class KeepAliveNodeService {
     return this.initialized;
   }
 
+  getNodeId(): string | null {
+    return this.nodeId;
+  }
+
+  getLastRecoveryPlan(): RecoveryPlan | null {
+    return this.lastRecoveryPlan;
+  }
+
   /**
-   * Open local storage. Safe with no Browser Profile and no SEO-OPS connection.
+   * Open local storage + run recovery prepare. Safe with no Browser / no SEO-OPS.
    */
   async initialize(): Promise<void> {
     if (this.initialized) return;
     await this.store.open();
+    const preferred = this.settings.get().keepAliveNodeId;
+    this.nodeId = this.store.getOrCreateNodeId(preferred);
+    if (preferred !== this.nodeId) {
+      await this.settings.set({ keepAliveNodeId: this.nodeId });
+    }
     this.initialized = true;
-    const enabled = this.isEnabled();
+
+    if (this.isEnabled()) {
+      this.lastRecoveryPlan = prepareRecovery(this.store, this.nodeId);
+    }
+
     logClientEvent("KEEPALIVE_NODE_INITIALIZED", {
-      enabled,
+      enabled: this.isEnabled(),
       dbPath: this.store.dbPath,
+      nodeId: this.nodeId,
+      schema: 2,
       browserRequired: false,
+      recoveryPrepared: this.lastRecoveryPlan != null,
+      assignedCampaigns: this.lastRecoveryPlan?.assignedCampaigns ?? 0,
     });
   }
 
@@ -65,53 +87,110 @@ export class KeepAliveNodeService {
     return this.settings.get().keepAlive24x7Enabled === true;
   }
 
-  async setEnabled(enabled: boolean): Promise<KeepAliveDiagnostics> {
+  async setEnabled(enabled: boolean): Promise<KeepAliveDiagnosticsV2> {
     await this.ensureReady();
     await this.settings.set({ keepAlive24x7Enabled: enabled });
-    logClientEvent("KEEPALIVE_NODE_ENABLED_CHANGED", { enabled });
+    logClientEvent("KEEPALIVE_NODE_ENABLED_CHANGED", { enabled, nodeId: this.nodeId });
+    if (enabled && this.nodeId) {
+      this.lastRecoveryPlan = prepareRecovery(this.store, this.nodeId);
+    }
     return this.getDiagnostics();
   }
 
-  async getDiagnostics(): Promise<KeepAliveDiagnostics> {
+  async getDiagnostics(): Promise<KeepAliveDiagnosticsV2> {
     await this.ensureReady();
-    const stats = await this.store.getStats();
+    const stats = await this.store.getStats(this.nodeId);
     return {
       enabled: this.isEnabled(),
       storageReady: this.store.isOpen,
+      nodeId: this.nodeId,
+      assignedCampaignCount: stats.assignedCampaignCount,
       campaignCount: stats.campaignCount,
       jobCount: stats.jobCount,
       pendingSyncCount: stats.pendingSyncCount,
+      lastAppliedSequence: stats.lastAppliedSequence,
+      detectedGapCount: stats.detectedGapCount,
+      lastRecoveryAttemptAt: stats.lastRecoveryAttemptAt,
       lastSyncAt: stats.lastSyncAt,
       storageBytes: stats.storageBytes,
+      storageHealth: stats.storageHealth,
       dbPath: stats.dbPath,
-      phase: "local-poc",
+      phase: "durable-sync-local",
       browserRequired: false,
+      claimRuntimeEnabled: false,
     };
   }
 
-  async upsertCampaignSnapshot(campaignId: string, payload: unknown) {
+  async assignCampaign(input: {
+    tenantId: string;
+    campaignId: string;
+    assignmentGeneration: number;
+    status?: "assigned" | "revoked";
+  }): Promise<CampaignAssignment> {
     await this.ensureReady();
-    return this.store.upsertCampaignSnapshot(campaignId, payload);
+    if (!this.nodeId) throw new Error("Keep Alive node_id is not ready");
+    return this.store.upsertAssignment({
+      tenantId: input.tenantId,
+      campaignId: input.campaignId,
+      nodeId: this.nodeId,
+      assignmentGeneration: input.assignmentGeneration,
+      status: input.status ?? "assigned",
+    });
   }
 
-  async appendJournalEvent(event: JobJournalEvent): Promise<boolean> {
+  async upsertCampaignSnapshot(input: CampaignSnapshotInput): Promise<SnapshotUpsertResult> {
     await this.ensureReady();
-    return this.store.appendJournalEvent(event);
+    if (!this.nodeId) throw new Error("Keep Alive node_id is not ready");
+    return upsertCampaignSnapshot(this.store, this.nodeId, input);
   }
 
-  async setSyncCheckpoint(checkpointKey: string, value: unknown) {
+  async ingestJobEvent(input: JobJournalEventInput): Promise<JournalIngestResult> {
     await this.ensureReady();
-    return this.store.setSyncCheckpoint(checkpointKey, value);
+    if (!this.nodeId) throw new Error("Keep Alive node_id is not ready");
+    return ingestJobEvent(this.store, this.nodeId, input);
   }
 
-  async markLocalSyncComplete(atIso?: string) {
+  async upsertScreenshotMetadata(input: ScreenshotMetadataInput): Promise<ScreenshotMetadataRecord> {
     await this.ensureReady();
-    return this.store.markLocalSyncComplete(atIso);
+    const now = new Date().toISOString();
+    const existing = this.store.getScreenshotMetadata(input.id);
+    const record: ScreenshotMetadataRecord = {
+      id: input.id,
+      tenantId: input.tenantId,
+      campaignId: input.campaignId,
+      jobId: input.jobId,
+      attempt: input.attempt,
+      storageKey: input.storageKey ?? existing?.storageKey ?? null,
+      sha256: input.sha256 ?? existing?.sha256 ?? null,
+      uploadStatus: input.uploadStatus ?? existing?.uploadStatus ?? "pending",
+      // Phase 2: never invent server ACK — only persist when caller supplies a real value.
+      serverAckAt:
+        input.serverAckAt !== undefined
+          ? input.serverAckAt
+          : (existing?.serverAckAt ?? null),
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    return this.store.upsertScreenshotMetadata(record);
   }
 
-  async upsertScreenshotMetadata(row: ScreenshotMetadataRow) {
+  async runRecovery(): Promise<RecoveryPlan> {
     await this.ensureReady();
-    return this.store.upsertScreenshotMetadata(row);
+    if (!this.nodeId) throw new Error("Keep Alive node_id is not ready");
+    this.lastRecoveryPlan = prepareRecovery(this.store, this.nodeId);
+    logClientEvent("KEEPALIVE_RECOVERY_PREPARED", {
+      recoveryId: this.lastRecoveryPlan.recoveryId,
+      assignedCampaigns: this.lastRecoveryPlan.assignedCampaigns,
+      requestCount: this.lastRecoveryPlan.requests.length,
+      replaySocialActions: false,
+    });
+    return this.lastRecoveryPlan;
+  }
+
+  /** Local diagnostic marker only — does not contact Server. */
+  async markLocalSyncComplete(atIso?: string): Promise<void> {
+    await this.ensureReady();
+    this.store.markLocalSyncComplete(atIso);
   }
 
   destroy(): void {

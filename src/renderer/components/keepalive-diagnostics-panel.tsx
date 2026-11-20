@@ -9,7 +9,7 @@ function formatBytes(bytes: number): string {
 }
 
 function formatTs(iso: string | null): string {
-  if (!iso) return "Chưa sync";
+  if (!iso) return "—";
   try {
     return new Date(iso).toLocaleString();
   } catch {
@@ -62,8 +62,8 @@ export function KeepAliveDiagnosticsPanel() {
     <div className="card keepalive-card">
       <div className="card-title">Keep Alive 24/7 Recovery Node</div>
       <div className="card-desc">
-        POC cục bộ: lưu Campaign / Job journal / checkpoint trên SQLite. Không claim Campaign,
-        không ACK Server, không cần mở Browser Profile.
+        Durable local sync engine: Campaign snapshots + Job journal + recovery plan. Không claim
+        Campaign, không ACK Server, không cần mở Browser Profile. Chỉ hiển thị dữ liệu local thật.
       </div>
 
       <div className="keepalive-toggle-row">
@@ -72,7 +72,7 @@ export function KeepAliveDiagnosticsPanel() {
             Bật Keep Alive 24/7
           </div>
           <div className="keepalive-hint">
-            Cấu hình được lưu trong settings.json và khôi phục sau khi restart.
+            Bật Node ≠ ủy quyền mọi Campaign. Chỉ Campaign được assign tường minh mới được lưu.
           </div>
         </div>
         <label className="keepalive-switch">
@@ -93,20 +93,42 @@ export function KeepAliveDiagnosticsPanel() {
           <div className="info-value">{enabled ? "Enabled" : "Disabled"}</div>
         </div>
         <div className="info-item">
-          <div className="info-label">Local Campaign</div>
+          <div className="info-label">Assigned Campaigns</div>
+          <div className="info-value">{diag?.assignedCampaignCount ?? "—"}</div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Local snapshots</div>
           <div className="info-value">{diag?.campaignCount ?? "—"}</div>
         </div>
         <div className="info-item">
-          <div className="info-label">Local Job</div>
+          <div className="info-label">Local Jobs</div>
           <div className="info-value">{diag?.jobCount ?? "—"}</div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Last applied sequence</div>
+          <div className="info-value">
+            {diag?.lastAppliedSequence == null ? "—" : diag.lastAppliedSequence}
+          </div>
         </div>
         <div className="info-item">
           <div className="info-label">Pending sync</div>
           <div className="info-value">{diag?.pendingSyncCount ?? "—"}</div>
         </div>
         <div className="info-item">
-          <div className="info-label">Last sync</div>
+          <div className="info-label">Detected gaps</div>
+          <div className="info-value">{diag?.detectedGapCount ?? "—"}</div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Last recovery attempt</div>
+          <div className="info-value">{formatTs(diag?.lastRecoveryAttemptAt ?? null)}</div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Local sync marker</div>
           <div className="info-value">{formatTs(diag?.lastSyncAt ?? null)}</div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Storage health</div>
+          <div className="info-value">{diag?.storageHealth ?? "—"}</div>
         </div>
         <div className="info-item">
           <div className="info-label">Local storage</div>
@@ -124,7 +146,9 @@ export function KeepAliveDiagnosticsPanel() {
           Refresh diagnostics
         </button>
         {diag?.storageReady ? (
-          <span className="keepalive-storage-ready">Storage ready · no Browser required</span>
+          <span className="keepalive-storage-ready">
+            Storage ready · no Browser · claim OFF · no fake Online/Sync
+          </span>
         ) : null}
       </div>
 

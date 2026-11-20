@@ -10,6 +10,8 @@ export interface ClientSettings {
   lastConnectedAt?: string;
   /** Keep Alive 24/7 Recovery Node (local POC). Default false. */
   keepAlive24x7Enabled?: boolean;
+  /** Stable local Keep Alive node id (not Device UUID / Account identity). */
+  keepAliveNodeId?: string;
 }
 
 export class ClientStore {
@@ -36,6 +38,10 @@ export class ClientStore {
           : undefined,
         lastConnectedAt: typeof parsed.lastConnectedAt === "string" ? parsed.lastConnectedAt : undefined,
         keepAlive24x7Enabled: parsed.keepAlive24x7Enabled === true,
+        keepAliveNodeId:
+          typeof parsed.keepAliveNodeId === "string" && parsed.keepAliveNodeId.trim()
+            ? parsed.keepAliveNodeId.trim()
+            : undefined,
       };
     } catch {
       // defaults

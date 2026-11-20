@@ -146,18 +146,25 @@ export interface ClientNotification {
   created_at?: string | null;
 }
 
-/** Keep Alive 24/7 Recovery Node diagnostics (local POC; no Server sync). */
+/** Keep Alive 24/7 Recovery Node diagnostics (local durable sync; no Server ACK). */
 export interface KeepAliveDiagnostics {
   enabled: boolean;
   storageReady: boolean;
+  nodeId: string | null;
+  assignedCampaignCount: number;
   campaignCount: number;
   jobCount: number;
   pendingSyncCount: number;
+  lastAppliedSequence: number | null;
+  detectedGapCount: number;
+  lastRecoveryAttemptAt: string | null;
   lastSyncAt: string | null;
   storageBytes: number;
+  storageHealth: "ok" | "degraded" | "unavailable";
   dbPath: string | null;
-  phase: "local-poc";
+  phase: "durable-sync-local";
   browserRequired: false;
+  claimRuntimeEnabled: false;
 }
 
 export type ClientCommand =

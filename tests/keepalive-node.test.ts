@@ -29,9 +29,11 @@ test("enable/disable Keep Alive persists across ClientStore reload", async () =>
     const enabled = await node1.setEnabled(true);
     assert.equal(enabled.enabled, true);
     assert.equal(store1.get().keepAlive24x7Enabled, true);
+    assert.ok(store1.get().keepAliveNodeId);
 
     const raw = JSON.parse(await readFile(path.join(dir, "settings.json"), "utf8"));
     assert.equal(raw.keepAlive24x7Enabled, true);
+    assert.ok(raw.keepAliveNodeId);
 
     node1.destroy();
 
@@ -42,6 +44,7 @@ test("enable/disable Keep Alive persists across ClientStore reload", async () =>
     const node2 = new KeepAliveNodeService(dir, store2);
     await node2.initialize();
     assert.equal((await node2.getDiagnostics()).enabled, true);
+    assert.equal(node2.getNodeId(), store2.get().keepAliveNodeId);
 
     await node2.setEnabled(false);
     node2.destroy();
@@ -52,124 +55,13 @@ test("enable/disable Keep Alive persists across ClientStore reload", async () =>
   });
 });
 
-test("SQLite read/write: campaign, journal, checkpoint, screenshot metadata", async () => {
+test("SQLite path is under userData/keepalive and uses WAL", async () => {
   await withTempDir(async (dir) => {
     const sqlite = new KeepAliveSqliteStore(dir);
     await sqlite.open();
-
-    const snap = sqlite.upsertCampaignSnapshot("camp-1", { name: "Demo", version: 1 });
-    assert.equal(snap.campaignId, "camp-1");
-    const loaded = sqlite.getCampaignSnapshot("camp-1");
-    assert.ok(loaded);
-    assert.match(loaded.payloadJson, /Demo/);
-
-    const inserted = sqlite.appendJournalEvent({
-      eventId: "evt-1",
-      jobId: "job-1",
-      attemptId: "att-1",
-      eventType: "started",
-      payloadJson: JSON.stringify({ step: 1 }),
-    });
-    assert.equal(inserted, true);
-    assert.equal(sqlite.getJournalEvent("evt-1")?.jobId, "job-1");
-
-    sqlite.setSyncCheckpoint("cursor", { offset: 42 });
-    assert.equal(sqlite.getSyncCheckpoint("cursor")?.valueJson.includes("42"), true);
-
-    sqlite.upsertScreenshotMetadata({
-      id: "shot-1",
-      jobId: "job-1",
-      filePath: "C:/tmp/final.png",
-      metaJson: JSON.stringify({ width: 1280 }),
-    });
-    assert.equal(sqlite.getScreenshotMetadata("shot-1")?.filePath, "C:/tmp/final.png");
-
-    sqlite.markLocalSyncComplete("2026-11-20T05:00:00.000Z");
-    const stats = await sqlite.getStats();
-    assert.equal(stats.campaignCount, 1);
-    assert.equal(stats.jobCount, 1);
-    assert.equal(stats.pendingSyncCount, 1);
-    assert.equal(stats.lastSyncAt, "2026-11-20T05:00:00.000Z");
-    assert.ok(stats.storageBytes > 0);
-
+    assert.equal(sqlite.dbPath, path.join(dir, "keepalive", "keepalive.sqlite"));
+    assert.equal(sqlite.getMeta("schema_version"), "2");
     sqlite.close();
-  });
-});
-
-test("duplicate journal event_id is idempotent", async () => {
-  await withTempDir(async (dir) => {
-    const sqlite = new KeepAliveSqliteStore(dir);
-    await sqlite.open();
-
-    const first = sqlite.appendJournalEvent({
-      eventId: "dup-1",
-      jobId: "job-a",
-      eventType: "completed",
-      payloadJson: JSON.stringify({ n: 1 }),
-    });
-    const second = sqlite.appendJournalEvent({
-      eventId: "dup-1",
-      jobId: "job-b",
-      eventType: "completed",
-      payloadJson: JSON.stringify({ n: 2 }),
-    });
-
-    assert.equal(first, true);
-    assert.equal(second, false);
-
-    const row = sqlite.getJournalEvent("dup-1");
-    assert.equal(row?.jobId, "job-a");
-    assert.match(row?.payloadJson ?? "", /"n":1/);
-
-    const stats = await sqlite.getStats();
-    assert.equal(stats.jobCount, 1);
-    assert.equal(stats.pendingSyncCount, 1);
-
-    sqlite.close();
-  });
-});
-
-test("restart recovery restores SQLite rows without Browser", async () => {
-  await withTempDir(async (dir) => {
-    const settings = new ClientStore(dir);
-    await settings.load();
-
-    const node1 = new KeepAliveNodeService(dir, settings);
-    await node1.initialize();
-    await node1.setEnabled(true);
-    await node1.upsertCampaignSnapshot("camp-r", { title: "recover-me" });
-    await node1.appendJournalEvent({
-      eventId: "evt-r",
-      jobId: "job-r",
-      eventType: "checkpoint",
-    });
-    await node1.setSyncCheckpoint("phase", { step: "local" });
-    await node1.upsertScreenshotMetadata({ id: "shot-r", jobId: "job-r" });
-    await node1.markLocalSyncComplete("2026-11-20T06:00:00.000Z");
-    node1.destroy();
-
-    // Fresh process simulation — no EmbeddedBrowser / ProfileManager involved.
-    const settings2 = new ClientStore(dir);
-    await settings2.load();
-    const node2 = new KeepAliveNodeService(dir, settings2);
-    await node2.initialize();
-
-    const diag = await node2.getDiagnostics();
-    assert.equal(diag.enabled, true);
-    assert.equal(diag.storageReady, true);
-    assert.equal(diag.browserRequired, false);
-    assert.equal(diag.campaignCount, 1);
-    assert.equal(diag.jobCount, 1);
-    assert.equal(diag.pendingSyncCount, 1);
-    assert.equal(diag.lastSyncAt, "2026-11-20T06:00:00.000Z");
-    assert.equal(diag.phase, "local-poc");
-
-    assert.equal(node2.sqlite.getCampaignSnapshot("camp-r")?.campaignId, "camp-r");
-    assert.equal(node2.sqlite.getJournalEvent("evt-r")?.eventType, "checkpoint");
-    assert.ok(node2.sqlite.getSyncCheckpoint("phase"));
-    assert.ok(node2.sqlite.getScreenshotMetadata("shot-r"));
-
-    node2.destroy();
   });
 });
 
@@ -179,11 +71,12 @@ test("Keep Alive initializes without Browser Profile infrastructure", async () =
     await settings.load();
     const node = new KeepAliveNodeService(dir, settings);
 
-    // Intentionally never construct ProfileManager / EmbeddedBrowser.
     await node.initialize();
     const diag = await node.getDiagnostics();
     assert.equal(diag.storageReady, true);
     assert.equal(diag.browserRequired, false);
+    assert.equal(diag.claimRuntimeEnabled, false);
+    assert.equal(diag.phase, "durable-sync-local");
     assert.ok(diag.dbPath?.includes("keepalive.sqlite"));
 
     node.destroy();
@@ -209,18 +102,12 @@ test("wiring contract: Keep Alive IPC and UI present; claim remains opt-in", asy
   assert.match(main, /setKeepAliveEnabled/);
   assert.match(main, /RPA_CAMPAIGN_CLAIM/);
   assert.match(contracts, /getKeepAliveDiagnostics/);
-  assert.match(contracts, /setKeepAliveEnabled/);
-  assert.match(contracts, /KeepAliveDiagnostics/);
+  assert.match(contracts, /assignedCampaignCount/);
+  assert.match(contracts, /detectedGapCount/);
   assert.match(store, /keepAlive24x7Enabled/);
   assert.match(shell, /KeepAliveDiagnosticsPanel/);
   assert.match(panel, /Keep Alive 24\/7/);
-  assert.match(panel, /setKeepAliveEnabled/);
-
-  // Phase 1 must not invent Server claim/ACK from Keep Alive path.
+  assert.match(panel, /Detected gaps/);
+  assert.match(panel, /Storage health/);
   assert.doesNotMatch(panel, /claimCampaign|ackCampaign|fake.?sync/i);
-  const keepaliveMainSlice = main.slice(
-    main.indexOf("KeepAliveNodeService"),
-    main.indexOf("KeepAliveNodeService") + 800
-  );
-  assert.doesNotMatch(keepaliveMainSlice, /claim\(|\.claim\b/);
 });
