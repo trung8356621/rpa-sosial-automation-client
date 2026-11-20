@@ -146,6 +146,20 @@ export interface ClientNotification {
   created_at?: string | null;
 }
 
+/** Keep Alive 24/7 Recovery Node diagnostics (local POC; no Server sync). */
+export interface KeepAliveDiagnostics {
+  enabled: boolean;
+  storageReady: boolean;
+  campaignCount: number;
+  jobCount: number;
+  pendingSyncCount: number;
+  lastSyncAt: string | null;
+  storageBytes: number;
+  dbPath: string | null;
+  phase: "local-poc";
+  browserRequired: false;
+}
+
 export type ClientCommand =
   | { type: "getConnectionState" }
   | { type: "setEndpoint"; endpoint: string }
@@ -184,7 +198,9 @@ export type ClientCommand =
   | { type: "getNotifications" }
   | { type: "ackNotification"; notificationId: string }
   | { type: "getWindowsNotificationStatus" }
-  | { type: "openWindowsNotificationSettings" };
+  | { type: "openWindowsNotificationSettings" }
+  | { type: "getKeepAliveDiagnostics" }
+  | { type: "setKeepAliveEnabled"; enabled: boolean };
 
 export interface ClientApi {
   invoke: <T = unknown>(command: ClientCommand) => Promise<T>;

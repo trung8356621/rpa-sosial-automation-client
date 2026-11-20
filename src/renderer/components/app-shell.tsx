@@ -7,6 +7,7 @@ import type {
 import { APP_USER_MODEL_ID } from "../../shared/windows-notification.js";
 import { DeviceStatusPanel } from "./device-status-panel.js";
 import { ConnectionSettingsPanel } from "./connection-settings-panel.js";
+import { KeepAliveDiagnosticsPanel } from "./keepalive-diagnostics-panel.js";
 import { BrowserProfilesPanel } from "./browser-profiles-panel.js";
 import { BrowserWorkspacePanel } from "./browser-workspace-panel.js";
 
@@ -236,6 +237,7 @@ export function AppShell() {
                 Kết nối thành công sẽ mở khóa Browser Profiles và các menu khác.
               </div>
               <ConnectionSettingsPanel state={state} onUpdate={refreshState} />
+              <KeepAliveDiagnosticsPanel />
             </>
           ) : (
             <>
@@ -309,12 +311,16 @@ export function AppShell() {
               {activeTab === "status" && (
                 <>
                   <DeviceStatusPanel state={state} onUpdate={refreshState} />
+                  <KeepAliveDiagnosticsPanel />
                   <ConnectionSettingsPanel state={state} onUpdate={refreshState} />
                 </>
               )}
 
               {activeTab === "settings" && (
-                <ConnectionSettingsPanel state={state} onUpdate={refreshState} />
+                <>
+                  <ConnectionSettingsPanel state={state} onUpdate={refreshState} />
+                  <KeepAliveDiagnosticsPanel />
+                </>
               )}
 
               {activeTab === "logs" && (

@@ -8,6 +8,8 @@ export interface ClientSettings {
   /** Temporary connection lease from SEO-OPS (not Device identity). */
   connectionToken?: string;
   lastConnectedAt?: string;
+  /** Keep Alive 24/7 Recovery Node (local POC). Default false. */
+  keepAlive24x7Enabled?: boolean;
 }
 
 export class ClientStore {
@@ -33,6 +35,7 @@ export class ClientStore {
           ? parsed.connectionToken.trim()
           : undefined,
         lastConnectedAt: typeof parsed.lastConnectedAt === "string" ? parsed.lastConnectedAt : undefined,
+        keepAlive24x7Enabled: parsed.keepAlive24x7Enabled === true,
       };
     } catch {
       // defaults

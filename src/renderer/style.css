@@ -1155,3 +1155,98 @@ body {
   flex-wrap: wrap;
   gap: 8px;
 }
+
+/* Keep Alive 24/7 diagnostics */
+.keepalive-card {
+  margin-top: 16px;
+}
+
+.keepalive-toggle-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 0 16px;
+}
+
+.keepalive-hint {
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.keepalive-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.keepalive-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.keepalive-switch-slider {
+  position: relative;
+  width: 42px;
+  height: 24px;
+  border-radius: 9999px;
+  background: #334155;
+  border: 1px solid #475569;
+  transition: background 0.15s ease;
+}
+
+.keepalive-switch-slider::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #e2e8f0;
+  transition: transform 0.15s ease;
+}
+
+.keepalive-switch input:checked + .keepalive-switch-slider {
+  background: rgba(16, 185, 129, 0.35);
+  border-color: rgba(16, 185, 129, 0.55);
+}
+
+.keepalive-switch input:checked + .keepalive-switch-slider::after {
+  transform: translateX(18px);
+}
+
+.keepalive-switch input:disabled + .keepalive-switch-slider {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.keepalive-switch-label {
+  min-width: 72px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+
+.keepalive-diag-grid {
+  margin-top: 4px;
+}
+
+.keepalive-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.keepalive-storage-ready {
+  color: #34d399;
+  font-size: 12px;
+}

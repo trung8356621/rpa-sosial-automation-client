@@ -26,6 +26,7 @@ import { CampaignJobExecutor } from "./jobs/campaign-job-executor.js";
 import { CampaignJobWorker } from "./jobs/campaign-job-worker.js";
 import { CampaignScriptLoader } from "./jobs/campaign-script-loader.js";
 import { createCampaignJobBrowserHost } from "./jobs/browser-host-adapter.js";
+import { KeepAliveNodeService } from "./keepalive/keepalive-node.js";
 import type { ClientCommand, BrowserStateSnapshot, ClientNotification } from "../shared/contracts.js";
 import { APP_USER_MODEL_ID } from "../shared/windows-notification.js";
 import { sharedBrowserVirtualClipboard } from "./browser/browser-virtual-clipboard.js";
@@ -95,6 +96,7 @@ const credentials = new ClientCredentialStore(userDataPath);
 const deviceManager = new DeviceManager(userDataPath);
 const connection = new ClientConnection(store, credentials, deviceManager);
 const profileManager = new ProfileManager(userDataPath);
+const keepAliveNode = new KeepAliveNodeService(userDataPath, store);
 let syncService: BrowserSyncService | null = null;
 let embeddedBrowser: EmbeddedBrowser | null = null;
 let notificationOrchestrator: NotificationOrchestrator | null = null;
@@ -256,6 +258,8 @@ async function bootstrap() {
   await credentials.hydrate();
   await deviceManager.initialize();
   await profileManager.initialize();
+  // Keep Alive storage + settings — no Browser Profile required.
+  await keepAliveNode.initialize();
 
   mainWindow = createWindow();
 
@@ -344,6 +348,7 @@ async function bootstrap() {
     () => {
       isQuitting = true;
       campaignJobWorker?.destroy();
+      keepAliveNode.destroy();
       notificationOrchestrator?.destroy();
       trayManager?.destroy();
       app.quit();
@@ -465,6 +470,10 @@ async function bootstrap() {
         armNotificationStatusRefreshOnFocus();
         return true;
       }
+      case "getKeepAliveDiagnostics":
+        return await keepAliveNode.getDiagnostics();
+      case "setKeepAliveEnabled":
+        return await keepAliveNode.setEnabled(cmd.enabled === true);
       case "copyAccountEmail": {
         try {
           const browserId = assertBrowserBoundToAccount(cmd.browserId, cmd.accountId);
