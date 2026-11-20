@@ -49,6 +49,29 @@ export type ArtifactAckState =
   | "mismatch"
   | "error";
 
+/** Socket.IO connection status for Keep Alive realtime hints (not durable sync). */
+export type KeepAliveSocketStatus =
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "disconnected"
+  | "error"
+  | "auth_blocked"
+  | "protocol_mismatch"
+  | "stopped";
+
+/** Realtime notification event names (hints only). */
+export const KEEPALIVE_SOCKET_EVENTS = [
+  "ka.notify",
+  "ka.assignment_changed",
+  "ka.route_invalidated",
+  "ka.recover_hint",
+] as const;
+
+export type KeepAliveSocketEventName = (typeof KEEPALIVE_SOCKET_EVENTS)[number];
+
+export const KEEPALIVE_SOCKET_PATH_DEFAULT = "/keepalive/socket.io/";
+
 /** Keys forbidden in Campaign snapshot metadata (secrets / browser identity). */
 export const SENSITIVE_SNAPSHOT_KEYS = [
   "cookie",
@@ -248,7 +271,7 @@ export interface KeepAliveDiagnosticsV2 {
   storageBytes: number;
   storageHealth: StorageHealth;
   dbPath: string | null;
-  phase: "durable-ack";
+  phase: "socket-hints";
   browserRequired: false;
   claimRuntimeEnabled: false;
   /**
@@ -263,6 +286,12 @@ export interface KeepAliveDiagnosticsV2 {
   lastAckError: string | null;
   artifactAckState: ArtifactAckState;
   artifactAckPendingCount: number;
+  socketStatus: KeepAliveSocketStatus;
+  socketConnected: boolean;
+  lastSocketNotifyAt: string | null;
+  socketReconnectAttempts: number;
+  socketRouteGeneration: number | null;
+  lastSocketError: string | null;
 }
 
 export type SnapshotUpsertResult =

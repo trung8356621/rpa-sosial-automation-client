@@ -717,7 +717,7 @@ test("Browser stopped + claim OFF — ACK still runs", async () => {
     const diag = await node.getDiagnostics();
     assert.equal(diag.browserRequired, false);
     assert.equal(diag.claimRuntimeEnabled, false);
-    assert.equal(diag.phase, "durable-ack");
+    assert.equal(diag.phase, "socket-hints");
     assert.equal(diag.serverDurableAck, true);
     // Ensure no claim paths invoked
     node.destroy();

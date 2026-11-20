@@ -113,8 +113,8 @@ export function KeepAliveDiagnosticsPanel() {
     <div className="card keepalive-card">
       <div className="card-title">Keep Alive 24/7 Recovery Node</div>
       <div className="card-desc">
-        Register + assignments + snapshot/events + durable delivery ACK (keepalive.v1). Không claim
-        Job, không Browser. Local applied sequence ≠ server ACK sequence.
+        HTTP + SQLite durable sync; Socket.IO hints only (keepalive.v1). Không claim Job, không
+        Browser. Local applied ≠ server ACK. Socket hints ≠ Sync PASS.
       </div>
 
       <div className="keepalive-toggle-row">
@@ -207,6 +207,32 @@ export function KeepAliveDiagnosticsPanel() {
           <div className="info-value">{diag?.serverDurableAck ? "Confirmed" : "None yet"}</div>
         </div>
         <div className="info-item">
+          <div className="info-label">Socket</div>
+          <div className="info-value">
+            {diag?.socketConnected
+              ? "Connected"
+              : (diag?.socketStatus ?? "idle")}
+          </div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Last socket notify</div>
+          <div className="info-value">{formatTs(diag?.lastSocketNotifyAt ?? null)}</div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Socket reconnects</div>
+          <div className="info-value">{diag?.socketReconnectAttempts ?? "—"}</div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Route generation</div>
+          <div className="info-value">
+            {diag?.socketRouteGeneration == null ? "—" : diag.socketRouteGeneration}
+          </div>
+        </div>
+        <div className="info-item">
+          <div className="info-label">Last socket error</div>
+          <div className="info-value">{diag?.lastSocketError || "—"}</div>
+        </div>
+        <div className="info-item">
           <div className="info-label">Last HTTP error</div>
           <div className="info-value">{diag?.lastHttpError || "—"}</div>
         </div>
@@ -239,7 +265,7 @@ export function KeepAliveDiagnosticsPanel() {
         </button>
         {diag?.storageReady ? (
           <span className="keepalive-storage-ready">
-            Storage ready · no Browser · claim OFF · durable ACK on
+            Storage ready · no Browser · claim OFF · socket hints on
           </span>
         ) : null}
       </div>

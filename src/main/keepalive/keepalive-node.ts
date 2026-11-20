@@ -98,6 +98,12 @@ export class KeepAliveNodeService {
     return this.settings.get().keepAlive24x7Enabled === true;
   }
 
+  /** Optional Socket.IO Gateway override from local settings (not ticket). */
+  getSocketGatewayOverride(): string | null {
+    const v = this.settings.get().keepAliveSocketGatewayUrl;
+    return v && v.trim() ? v.trim().replace(/\/+$/, "") : null;
+  }
+
   async setEnabled(enabled: boolean): Promise<KeepAliveDiagnosticsV2> {
     await this.ensureReady();
     await this.settings.set({ keepAlive24x7Enabled: enabled });
@@ -150,7 +156,7 @@ export class KeepAliveNodeService {
       storageBytes: stats.storageBytes,
       storageHealth: stats.storageHealth,
       dbPath: stats.dbPath,
-      phase: "durable-ack",
+      phase: "socket-hints",
       browserRequired: false,
       claimRuntimeEnabled: false,
       serverDurableAck: sync?.serverDurableAck === true,
@@ -161,6 +167,12 @@ export class KeepAliveNodeService {
       lastAckError: sync?.lastAckError ?? null,
       artifactAckState: sync?.artifactAckState ?? "idle",
       artifactAckPendingCount: sync?.artifactAckPendingCount ?? 0,
+      socketStatus: sync?.socketStatus ?? "idle",
+      socketConnected: sync?.socketConnected === true,
+      lastSocketNotifyAt: sync?.lastSocketNotifyAt ?? null,
+      socketReconnectAttempts: sync?.socketReconnectAttempts ?? 0,
+      socketRouteGeneration: sync?.socketRouteGeneration ?? null,
+      lastSocketError: sync?.lastSocketError ?? null,
     };
   }
 

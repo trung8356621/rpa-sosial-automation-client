@@ -12,6 +12,11 @@ export interface ClientSettings {
   keepAlive24x7Enabled?: boolean;
   /** Stable local Keep Alive node id (not Device UUID / Account identity). */
   keepAliveNodeId?: string;
+  /**
+   * Optional Keep Alive Socket.IO Gateway base URL (https/wss).
+   * When omitted, ticket.gateway_url or Client HTTP endpoint is used.
+   */
+  keepAliveSocketGatewayUrl?: string;
 }
 
 export class ClientStore {
@@ -41,6 +46,11 @@ export class ClientStore {
         keepAliveNodeId:
           typeof parsed.keepAliveNodeId === "string" && parsed.keepAliveNodeId.trim()
             ? parsed.keepAliveNodeId.trim()
+            : undefined,
+        keepAliveSocketGatewayUrl:
+          typeof parsed.keepAliveSocketGatewayUrl === "string" &&
+          parsed.keepAliveSocketGatewayUrl.trim()
+            ? parsed.keepAliveSocketGatewayUrl.trim().replace(/\/+$/, "")
             : undefined,
       };
     } catch {

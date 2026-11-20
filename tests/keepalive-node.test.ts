@@ -76,8 +76,9 @@ test("Keep Alive initializes without Browser Profile infrastructure", async () =
     assert.equal(diag.storageReady, true);
     assert.equal(diag.browserRequired, false);
     assert.equal(diag.claimRuntimeEnabled, false);
-    assert.equal(diag.phase, "durable-ack");
+    assert.equal(diag.phase, "socket-hints");
     assert.equal(diag.serverDurableAck, false);
+    assert.equal(diag.socketConnected, false);
     assert.ok(
       diag.snapshotSyncStatus === "not_started" ||
         diag.snapshotSyncStatus === "idle" ||

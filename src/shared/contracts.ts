@@ -181,7 +181,7 @@ export interface KeepAliveDiagnostics {
   storageBytes: number;
   storageHealth: "ok" | "degraded" | "unavailable";
   dbPath: string | null;
-  phase: "durable-ack";
+  phase: "socket-hints";
   browserRequired: false;
   claimRuntimeEnabled: false;
   /** True only after server-confirmed delivery ACK (never from local persist alone). */
@@ -199,6 +199,20 @@ export interface KeepAliveDiagnostics {
     | "mismatch"
     | "error";
   artifactAckPendingCount: number;
+  socketStatus:
+    | "idle"
+    | "connecting"
+    | "connected"
+    | "disconnected"
+    | "error"
+    | "auth_blocked"
+    | "protocol_mismatch"
+    | "stopped";
+  socketConnected: boolean;
+  lastSocketNotifyAt: string | null;
+  socketReconnectAttempts: number;
+  socketRouteGeneration: number | null;
+  lastSocketError: string | null;
 }
 
 export type ClientCommand =

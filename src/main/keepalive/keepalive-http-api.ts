@@ -4,6 +4,7 @@ import {
   KEEPALIVE_PROTOCOL_VERSION,
   KEEPALIVE_SCHEMA_VERSION,
   KEEPALIVE_CAPABILITIES,
+  KEEPALIVE_SOCKET_PATH_DEFAULT,
 } from "./contracts.js";
 
 export const KEEPALIVE_REGISTER_PATH = "/api/v1/social-automation/client/keepalive/register";
@@ -13,6 +14,8 @@ export const KEEPALIVE_EVENTS_ACK_PATH =
   "/api/v1/social-automation/client/keepalive/events/ack";
 export const KEEPALIVE_ARTIFACTS_ACK_PATH =
   "/api/v1/social-automation/client/keepalive/artifacts/ack";
+export const KEEPALIVE_SOCKET_TICKET_PATH =
+  "/api/v1/social-automation/client/keepalive/socket/ticket";
 
 /** Default page size for event feed (bounded). */
 export const KEEPALIVE_EVENTS_PAGE_LIMIT = 100;
@@ -123,6 +126,23 @@ export interface KeepAliveArtifactAckResponse {
   storageKey: string;
   acked: boolean;
   idempotent: boolean;
+}
+
+/**
+ * Short-lived Socket.IO Gateway ticket (keepalive.v1 / 3B.6B).
+ * Never persist ticket to SQLite or logs — memory only.
+ */
+export interface KeepAliveSocketTicketResponse {
+  protocolVersion: string;
+  schemaVersion: number;
+  nodeId: string;
+  tenantId: string;
+  /** Opaque short-lived ticket for Socket.IO auth.ticket — never the Client API Key. */
+  ticket: string;
+  expiresAt: string;
+  gatewayUrl: string;
+  socketPath: string;
+  routeGeneration: number;
 }
 
 /**
@@ -323,6 +343,30 @@ export class KeepAliveHttpApi {
         schema_version: KEEPALIVE_SCHEMA_VERSION,
       });
       return parseArtifactAckResponse(res, params.nodeId, params.campaignId);
+    } catch (err) {
+      return mapHttpError(err);
+    }
+  }
+
+  /**
+   * Mint a fresh Socket.IO Gateway ticket via Client API Key HTTP.
+   * Ticket is for auth.ticket only — never forwarded as API Key to Gateway.
+   */
+  async mintSocketTicket(params: {
+    nodeId: string;
+  }): Promise<KeepAliveHttpResult<KeepAliveSocketTicketResponse>> {
+    if (!this.connection.isOnline()) {
+      return offlineResult("Client chưa online — không mint socket ticket.");
+    }
+    try {
+      const res = await this.connection.requestWithAuth(KEEPALIVE_SOCKET_TICKET_PATH, "POST", {
+        node_id: params.nodeId,
+        protocol_version: KEEPALIVE_PROTOCOL_VERSION,
+        schema_version: KEEPALIVE_SCHEMA_VERSION,
+        capabilities: [...KEEPALIVE_CAPABILITIES, "socket_hints"],
+      });
+      const endpoint = this.connection.getState().endpoint;
+      return parseSocketTicketResponse(res, params.nodeId, endpoint);
     } catch (err) {
       return mapHttpError(err);
     }
@@ -864,6 +908,122 @@ export function parseArtifactAckResponse(
       idempotent: raw.idempotent === true || raw.already_acked === true || raw.duplicate === true,
     },
   };
+}
+
+export function parseSocketTicketResponse(
+  raw: Record<string, unknown>,
+  expectedNodeId: string,
+  fallbackEndpoint: string
+): KeepAliveHttpResult<KeepAliveSocketTicketResponse> {
+  const protocolVersion = str(raw.protocol_version) ?? str(raw.protocolVersion);
+  const schemaVersion = num(raw.schema_version) ?? num(raw.schemaVersion);
+  const nodeId = str(raw.node_id) ?? str(raw.nodeId) ?? expectedNodeId;
+  const tenantId = str(raw.tenant_id) ?? str(raw.tenantId);
+  const ticket = str(raw.ticket) ?? str(raw.socket_ticket) ?? str(raw.socketTicket);
+  const expiresAt =
+    str(raw.expires_at) ?? str(raw.expiresAt) ?? str(raw.ticket_expires_at);
+  const routeGeneration =
+    num(raw.route_generation) ?? num(raw.routeGeneration) ?? 0;
+  const socketPath =
+    str(raw.socket_path) ??
+    str(raw.socketPath) ??
+    str(raw.path) ??
+    KEEPALIVE_SOCKET_PATH_DEFAULT;
+  const gatewayUrlRaw =
+    str(raw.gateway_url) ??
+    str(raw.gatewayUrl) ??
+    str(raw.socket_url) ??
+    str(raw.socketUrl) ??
+    fallbackEndpoint;
+
+  const proto = checkProtocol(protocolVersion, schemaVersion);
+  if (!proto.ok) return proto;
+  if (nodeId !== expectedNodeId) {
+    return {
+      ok: false,
+      status: 422,
+      code: "node_id_mismatch",
+      message: "Socket ticket node_id không khớp Keep Alive node cục bộ.",
+      fatal: true,
+    };
+  }
+  if (!tenantId) {
+    return {
+      ok: false,
+      status: 422,
+      code: "tenant_id_missing",
+      message: "Socket ticket thiếu server-owned tenant_id.",
+      fatal: true,
+    };
+  }
+  if (!ticket) {
+    return {
+      ok: false,
+      status: 422,
+      code: "ticket_missing",
+      message: "Socket ticket response thiếu ticket.",
+      fatal: false,
+    };
+  }
+  if (!expiresAt) {
+    return {
+      ok: false,
+      status: 422,
+      code: "ticket_expires_missing",
+      message: "Socket ticket thiếu expires_at.",
+      fatal: false,
+    };
+  }
+  if (routeGeneration < 1) {
+    return {
+      ok: false,
+      status: 422,
+      code: "route_generation_missing",
+      message: "Socket ticket thiếu route_generation.",
+      fatal: false,
+    };
+  }
+
+  const gatewayUrl = normalizeGatewayUrl(gatewayUrlRaw);
+  if (!gatewayUrl) {
+    return {
+      ok: false,
+      status: 422,
+      code: "gateway_url_invalid",
+      message: "Socket ticket gateway_url không hợp lệ.",
+      fatal: false,
+    };
+  }
+
+  return {
+    ok: true,
+    data: {
+      protocolVersion: protocolVersion!,
+      schemaVersion: schemaVersion!,
+      nodeId,
+      tenantId,
+      ticket,
+      expiresAt,
+      gatewayUrl,
+      socketPath: socketPath.startsWith("/") ? socketPath : `/${socketPath}`,
+      routeGeneration,
+    },
+  };
+}
+
+function normalizeGatewayUrl(raw: string): string | null {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  if (!trimmed) return null;
+  try {
+    const withScheme = /^wss?:\/\//i.test(trimmed)
+      ? trimmed.replace(/^ws/i, "http")
+      : trimmed;
+    if (!/^https?:\/\//i.test(withScheme)) return null;
+    const u = new URL(withScheme);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return null;
+  }
 }
 
 function checkProtocol(

@@ -4,14 +4,20 @@ import type {
   ArtifactAckState,
   KeepAliveRegistrationStatus,
   KeepAliveSnapshotSyncStatus,
+  KeepAliveSocketStatus,
 } from "./contracts.js";
 import { flushDurableAcks } from "./ack-engine.js";
 import { applyServerAssignments, revokeAllActiveAssignments } from "./assignment-apply.js";
 import { syncAllAssignedCampaignData } from "./campaign-data-sync.js";
 import { KeepAliveHttpApi } from "./keepalive-http-api.js";
 import type { KeepAliveNodeService } from "./keepalive-node.js";
+import {
+  KeepAliveSocketClient,
+  type KeepAliveSocketFactory,
+  type KeepAliveSocketHint,
+} from "./keepalive-socket-client.js";
 
-/** Conservative coalesced refresh until Socket.IO exists (not per-heartbeat). */
+/** HTTP catch-up remains durable path; Socket.IO only reduces latency of the same sync. */
 const PERIODIC_REFRESH_MS = 5 * 60_000;
 const RETRY_INITIAL_MS = 2_000;
 const RETRY_MAX_MS = 60_000;
@@ -38,6 +44,12 @@ export interface KeepAliveSyncState {
   lastAckError: string | null;
   artifactAckState: ArtifactAckState;
   artifactAckPendingCount: number;
+  socketStatus: KeepAliveSocketStatus;
+  socketConnected: boolean;
+  lastSocketNotifyAt: string | null;
+  socketReconnectAttempts: number;
+  socketRouteGeneration: number | null;
+  lastSocketError: string | null;
 }
 
 /**
@@ -70,13 +82,27 @@ export class KeepAliveSyncService {
   private lastAckError: string | null = null;
   private artifactAckState: ArtifactAckState = "idle";
   private artifactAckPendingCount = 0;
+  private readonly socket: KeepAliveSocketClient;
 
   constructor(
     private readonly connection: ClientConnection,
     private readonly node: KeepAliveNodeService,
-    api?: KeepAliveHttpApi
+    api?: KeepAliveHttpApi,
+    socketFactory?: KeepAliveSocketFactory
   ) {
     this.api = api ?? new KeepAliveHttpApi(connection);
+    this.socket = new KeepAliveSocketClient(this.api, {
+      getNodeId: () => this.node.getNodeId(),
+      isEnabled: () => this.node.isEnabled(),
+      isOnline: () => this.connection.isOnline(),
+      getGatewayOverride: () => {
+        const env = process.env.RPA_KEEPALIVE_SOCKET_GATEWAY?.trim();
+        if (env) return env.replace(/\/+$/, "");
+        return this.node.getSocketGatewayOverride();
+      },
+      onHints: (hints) => this.onSocketHints(hints),
+      socketFactory,
+    });
     this.connection.onStateChange((state) => {
       const online = state.status === "connected" && state.online;
       if (online && !this.wasOnline) {
@@ -87,6 +113,7 @@ export class KeepAliveSyncService {
       } else if (!online) {
         this.stopPeriodic();
         this.clearRetry();
+        this.socket.stop("offline");
         if (this.registrationStatus === "registered") {
           this.registrationStatus = "offline";
         }
@@ -117,6 +144,7 @@ export class KeepAliveSyncService {
       lastAckError: this.lastAckError,
       artifactAckState: this.artifactAckState,
       artifactAckPendingCount: this.artifactAckPendingCount,
+      ...this.socket.getDiagnostics(),
     };
   }
 
@@ -125,6 +153,7 @@ export class KeepAliveSyncService {
     if (!enabled) {
       this.stopPeriodic();
       this.clearRetry();
+      this.socket.stop("disabled");
       this.registeredConnectionKey = null;
       this.registrationStatus = "stopped";
       this.serverAssignmentCount = null;
@@ -153,9 +182,33 @@ export class KeepAliveSyncService {
     return this.getState();
   }
 
+  /** Test helper — inject socket hint without LIVE Gateway. */
+  ingestSocketHintForTests(
+    raw: unknown,
+    event: KeepAliveSocketHint["event"] = "ka.notify"
+  ): void {
+    this.socket.ingestTestHint(raw, event);
+  }
+
   destroy(): void {
     this.stopPeriodic();
     this.clearRetry();
+    this.socket.destroy();
+  }
+
+  private onSocketHints(hints: KeepAliveSocketHint[]): void {
+    if (!this.node.isEnabled() || this.stoppedFatal) return;
+    const wantsAssignments = hints.some(
+      (h) => h.event === "ka.assignment_changed" || h.event === "ka.route_invalidated"
+    );
+    const wantsRecover = hints.some((h) => h.event === "ka.recover_hint");
+    const reason = wantsAssignments
+      ? "socket_assignment"
+      : wantsRecover
+        ? "socket_recover"
+        : "socket_notify";
+    // Deduped with inFlight — never per-event HTTP storm.
+    void this.sync(reason);
   }
 
   private startPeriodic(): void {
@@ -164,6 +217,7 @@ export class KeepAliveSyncService {
     this.periodicTimer = setInterval(() => {
       void this.sync("periodic");
     }, PERIODIC_REFRESH_MS);
+    this.periodicTimer.unref?.();
   }
 
   private stopPeriodic(): void {
@@ -198,6 +252,7 @@ export class KeepAliveSyncService {
     this.retryTimer = setTimeout(() => {
       void this.sync("retry");
     }, delay);
+    this.retryTimer.unref?.();
   }
 
   private connectionKey(): string {
@@ -253,6 +308,7 @@ export class KeepAliveSyncService {
           this.registrationStatus =
             reg.status === 401 || reg.status === 403 ? "auth_blocked" : "protocol_mismatch";
           this.stopPeriodic();
+          this.socket.stop("auth_blocked");
           logClientError(
             "KEEPALIVE_REGISTER_FATAL",
             new Error(`${reg.code} status=${reg.status} reason=${reason}: ${reg.message}`)
@@ -292,6 +348,7 @@ export class KeepAliveSyncService {
         this.registrationStatus =
           assign.status === 401 || assign.status === 403 ? "auth_blocked" : "protocol_mismatch";
         this.stopPeriodic();
+        this.socket.stop("auth_blocked");
         // Do not wipe local history; revoke observation on auth/protocol hard fail.
         revokeAllActiveAssignments(this.node.sqlite, nodeId);
         logClientError(
@@ -394,6 +451,7 @@ export class KeepAliveSyncService {
         this.stoppedFatal = true;
         this.registrationStatus = "auth_blocked";
         this.stopPeriodic();
+        this.socket.stop("auth_blocked");
         revokeAllActiveAssignments(this.node.sqlite, nodeId);
         return;
       }
@@ -430,5 +488,10 @@ export class KeepAliveSyncService {
 
     // Local recovery plan after sync — no social replay.
     await this.node.runRecovery();
+
+    // Socket.IO hints (optional latency path). HTTP remains durable authority.
+    if (!this.stoppedFatal && this.registrationStatus === "registered") {
+      void this.socket.start(reason.startsWith("socket_") ? "after_http_catchup" : reason);
+    }
   }
 }

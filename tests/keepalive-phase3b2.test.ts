@@ -417,6 +417,26 @@ test("reconnect re-registers; server unavailable is non-fatal; disable revokes",
           registers += 1;
           return envelope({ node_id: "n-re", tenant_id: "t1", registered: true });
         }
+        if (method === "POST" && subpath.includes("/socket/ticket")) {
+          return envelope({
+            node_id: "n-re",
+            tenant_id: "t1",
+            ticket: "re-ticket",
+            expires_at: new Date(Date.now() + 60_000).toISOString(),
+            gateway_url: "https://seo-ops.test",
+            socket_path: "/keepalive/socket.io/",
+            route_generation: 1,
+          });
+        }
+        if (method === "POST" && (subpath.includes("/events/ack") || subpath.includes("/artifacts/ack"))) {
+          return envelope({
+            node_id: "n-re",
+            tenant_id: "t1",
+            last_contiguous_sequence: 0,
+            acked_event_ids: [],
+            acked: true,
+          });
+        }
         return envelope({ node_id: "n-re", tenant_id: "t1", assignments: [] });
       },
     });
@@ -507,9 +527,30 @@ test("duplicate register for same connection is skipped", async () => {
     let registers = 0;
     const conn = createMockConnection({
       handler: async (subpath, method) => {
-        if (method === "POST") {
+        if (method === "POST" && subpath.includes("/keepalive/register")) {
           registers += 1;
           return envelope({ node_id: "dup", tenant_id: "t", registered: true, idempotent: true });
+        }
+        if (method === "POST" && subpath.includes("/socket/ticket")) {
+          return envelope({
+            node_id: "dup",
+            tenant_id: "t",
+            ticket: "dup-ticket",
+            expires_at: new Date(Date.now() + 60_000).toISOString(),
+            gateway_url: "https://seo-ops.test",
+            socket_path: "/keepalive/socket.io/",
+            route_generation: 1,
+          });
+        }
+        if (method === "POST" && (subpath.includes("/events/ack") || subpath.includes("/artifacts/ack"))) {
+          return envelope({
+            node_id: "dup",
+            tenant_id: "t",
+            campaign_id: "x",
+            last_contiguous_sequence: 0,
+            acked_event_ids: [],
+            acked: true,
+          });
         }
         return envelope({ node_id: "dup", tenant_id: "t", assignments: [] });
       },
@@ -519,6 +560,7 @@ test("duplicate register for same connection is skipped", async () => {
     await settings.set({ keepAliveNodeId: "dup" });
     const node = new KeepAliveNodeService(dir, settings);
     await node.initialize();
+    // No socket factory → ticket mint ok but socket.io connect fails soft; unref timers.
     const sync = new KeepAliveSyncService(conn as never, node, new KeepAliveHttpApi(conn as never));
     node.attachSyncService(sync);
     await node.setEnabled(true);
