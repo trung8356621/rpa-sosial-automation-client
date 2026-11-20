@@ -152,13 +152,14 @@ export async function syncAssignedCampaignData(
   }
 
   // Gap fill pass: request explicit missing ranges (bounded).
+  // Backend uses exclusive from_sequence (event_sequence > from_sequence), so subtract 1 from inclusive gap.from.
   if (base.gapCount > 0) {
     const gaps = countGaps(sequences, lastSeen);
     for (const gap of gaps.slice(0, 5)) {
       const fill = await pullAndIngestEvents(api, store, {
         ...params,
         assignmentGeneration: snap.data.assignmentGeneration,
-        fromSequence: gap.from,
+        fromSequence: Math.max(0, gap.from - 1),
         toSequence: gap.to,
       });
       base.eventsIngested += fill.eventsIngested;
@@ -274,9 +275,11 @@ async function pullAndIngestEvents(
   let eventsIngested = 0;
   let eventsSkippedTransient = 0;
   let eventSequenceHead: number | null = null;
+  // Backend uses exclusive from_sequence (event_sequence > from_sequence):
+  // pass lastAppliedSequence directly without +1 so initial 0 fetches from #1.
   const fromSequence =
     params.fromSequence ??
-    (store.getCursor(params.tenantId, params.campaignId)?.lastAppliedSequence ?? 0) + 1;
+    (store.getCursor(params.tenantId, params.campaignId)?.lastAppliedSequence ?? 0);
 
   for (let page = 0; page < MAX_EVENT_PAGES; page++) {
     const res = await api.fetchEvents({

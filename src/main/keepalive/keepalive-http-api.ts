@@ -612,7 +612,14 @@ export function parseSnapshotResponse(
     };
   }
 
-  const metaRaw = raw.metadata ?? raw.meta ?? {};
+  let metaRaw = raw.metadata ?? raw.meta;
+  if (metaRaw === undefined) {
+    const extracted: Record<string, unknown> = {};
+    for (const k of ["campaign", "contents", "jobs", "content_counts", "job_counts"] as const) {
+      if (raw[k] !== undefined) extracted[k] = raw[k];
+    }
+    metaRaw = extracted;
+  }
   if (!metaRaw || typeof metaRaw !== "object" || Array.isArray(metaRaw)) {
     return {
       ok: false,
@@ -659,11 +666,23 @@ export function parseEventsResponse(
     num(raw.assignment_generation) ?? num(raw.assignmentGeneration) ?? 0;
   const eventSequenceHead =
     num(raw.event_sequence_head) ?? num(raw.eventSequenceHead);
-  const nextCursor = str(raw.next_cursor) ?? str(raw.nextCursor);
+  const nextCursorNum = num(raw.next_cursor) ?? num(raw.nextCursor);
+  const nextCursor =
+    str(raw.next_cursor) ??
+    str(raw.nextCursor) ??
+    (nextCursorNum != null ? String(nextCursorNum) : null);
+  const explicitHasMore =
+    typeof raw.has_more === "boolean"
+      ? raw.has_more
+      : typeof raw.hasMore === "boolean"
+        ? raw.hasMore
+        : null;
   const hasMore =
-    raw.has_more === true ||
-    raw.hasMore === true ||
-    (nextCursor != null && nextCursor.length > 0);
+    explicitHasMore !== null
+      ? explicitHasMore
+      : nextCursorNum != null
+        ? eventSequenceHead != null && nextCursorNum < eventSequenceHead
+        : nextCursor != null && nextCursor.length > 0;
 
   const proto = checkProtocol(protocolVersion, schemaVersion);
   if (!proto.ok) return proto;

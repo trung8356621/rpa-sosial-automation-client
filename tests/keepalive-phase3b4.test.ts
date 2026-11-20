@@ -13,6 +13,7 @@ import {
   KEEPALIVE_CAMPAIGNS_BASE,
 } from "../src/main/keepalive/keepalive-http-api.js";
 import { syncAssignedCampaignData } from "../src/main/keepalive/campaign-data-sync.js";
+import { flushDurableAcks } from "../src/main/keepalive/ack-engine.js";
 import {
   KEEPALIVE_PROTOCOL_VERSION,
   KEEPALIVE_SCHEMA_VERSION,
@@ -525,4 +526,259 @@ test("wiring contract: snapshot/events paths + claim remains opt-in", async () =
   assert.match(panel, /Pending recovery/);
   assert.match(panel, /Local applied sequence|Server ACK sequence/);
   assert.doesNotMatch(panel, /claimCampaign/i);
+});
+
+test("exclusive from_sequence=0 fetches event #1, paginates without skip, and handles numeric next_cursor", async () => {
+  await withTempDir(async (dir) => {
+    const requestedFrom: number[] = [];
+    const allEvents = [
+      eventRow(1, "job_reserved", { attempt: null, payload: null, payload_version: 2 }),
+      eventRow(2, "job_started"),
+      eventRow(3, "job_completed"),
+      eventRow(4, "job_reserved"),
+    ];
+    const conn = createMockConnection(async (subpath) => {
+      if (subpath.includes("/snapshot")) {
+        return {
+          ok: true,
+          protocol_version: KEEPALIVE_PROTOCOL_VERSION,
+          schema_version: KEEPALIVE_SCHEMA_VERSION,
+          tenant_id: "install-1",
+          node_id: "n1",
+          assignment_generation: 1,
+          campaign_id: "c-excl",
+          snapshot_version: 4,
+          event_sequence_head: 4,
+          campaign: { campaign_id: "c-excl", name: "test wp 3", status: "running" },
+          content_counts: { running: 1 },
+          job_counts: { reserved: 1 },
+        };
+      }
+      if (subpath.includes("/events")) {
+        const u = new URL(`https://seo-ops.test${subpath}`);
+        const cursor = u.searchParams.get("cursor");
+        const fromSeq = Number(u.searchParams.get("from_sequence") ?? "0");
+        if (!cursor) {
+          requestedFrom.push(fromSeq);
+          // Exclusive: event_sequence > from_sequence; page 1 returns up to 2 events
+          const slice = allEvents.filter((e) => (e.event_sequence as number) > fromSeq).slice(0, 2);
+          return envelope({
+            node_id: "n1",
+            tenant_id: "install-1",
+            campaign_id: "c-excl",
+            assignment_generation: 1,
+            events: slice,
+            next_cursor: 2,
+            event_sequence_head: 4,
+          });
+        }
+        const afterCursor = Number(cursor);
+        const slice = allEvents.filter((e) => (e.event_sequence as number) > afterCursor);
+        return envelope({
+          node_id: "n1",
+          tenant_id: "install-1",
+          campaign_id: "c-excl",
+          assignment_generation: 1,
+          events: slice,
+          next_cursor: 4,
+          event_sequence_head: 4,
+        });
+      }
+      throw new Error(subpath);
+    });
+
+    const { node } = await bootNode(dir, "n1", conn);
+    await node.assignCampaign({
+      tenantId: "install-1",
+      campaignId: "c-excl",
+      assignmentGeneration: 1,
+    });
+    const api = new KeepAliveHttpApi(conn as never);
+    const out = await syncAssignedCampaignData(api, node.sqlite, {
+      nodeId: "n1",
+      tenantId: "install-1",
+      campaignId: "c-excl",
+      assignmentGeneration: 1,
+    });
+
+    assert.equal(requestedFrom[0], 0);
+    assert.equal(out.eventsIngested, 4);
+    assert.equal(out.lastAppliedSequence, 4);
+    assert.equal(out.gapCount, 0);
+    assert.equal(out.pendingRecovery, false);
+    assert.equal(out.pages, 2);
+    assert.ok(node.sqlite.getJournalEvent("e-1"));
+    assert.equal(node.sqlite.getSnapshot("install-1", "c-excl")?.sequence, 0);
+    node.destroy();
+  });
+});
+
+test("missing event #1 blocks ACK; gap recovery uses from_sequence=0 without Social replay", async () => {
+  await withTempDir(async (dir) => {
+    let returnEvent1 = false;
+    let ackCalls = 0;
+    const seenFrom: number[] = [];
+
+    const conn = createMockConnection(async (subpath, method) => {
+      if (subpath.includes("/snapshot")) {
+        return {
+          ok: true,
+          protocol_version: KEEPALIVE_PROTOCOL_VERSION,
+          schema_version: KEEPALIVE_SCHEMA_VERSION,
+          tenant_id: "install-1",
+          node_id: "n1",
+          assignment_generation: 1,
+          campaign_id: "c-gap",
+          snapshot_version: 3,
+          event_sequence_head: 3,
+          campaign: { campaign_id: "c-gap", name: "gap test" },
+        };
+      }
+      if (subpath.includes("/events/ack") && method === "POST") {
+        ackCalls += 1;
+        return envelope({
+          node_id: "n1",
+          tenant_id: "install-1",
+          campaign_id: "c-gap",
+          last_contiguous_sequence: 3,
+          acked_event_ids: ["e-1", "e-2", "e-3"],
+          idempotent: false,
+        });
+      }
+      if (subpath.includes("/events")) {
+        const u = new URL(`https://seo-ops.test${subpath}`);
+        const fromSeq = Number(u.searchParams.get("from_sequence") ?? "0");
+        const toSeq = u.searchParams.get("to_sequence") ? Number(u.searchParams.get("to_sequence")) : null;
+        seenFrom.push(fromSeq);
+        const pool = [
+          ...(returnEvent1 ? [eventRow(1, "job_reserved")] : []),
+          eventRow(2, "job_started"),
+          eventRow(3, "job_completed"),
+        ].filter((e) => {
+          const s = e.event_sequence as number;
+          return s > fromSeq && (toSeq == null || s <= toSeq);
+        });
+        return envelope({
+          node_id: "n1",
+          tenant_id: "install-1",
+          campaign_id: "c-gap",
+          assignment_generation: 1,
+          events: pool,
+          next_cursor: 3,
+          event_sequence_head: 3,
+        });
+      }
+      throw new Error(subpath);
+    });
+
+    const { node } = await bootNode(dir, "n1", conn);
+    await node.assignCampaign({
+      tenantId: "install-1",
+      campaignId: "c-gap",
+      assignmentGeneration: 1,
+    });
+    const api = new KeepAliveHttpApi(conn as never);
+
+    // 1st sync: event #1 missing -> gap detected, cursor stays 0, ACK blocked
+    const first = await syncAssignedCampaignData(api, node.sqlite, {
+      nodeId: "n1",
+      tenantId: "install-1",
+      campaignId: "c-gap",
+      assignmentGeneration: 1,
+    });
+    assert.equal(first.lastAppliedSequence, 0);
+    assert.equal(first.gapCount, 1);
+    assert.equal(first.pendingRecovery, true);
+
+    const blockedAck = await flushDurableAcks(api, node.sqlite, {
+      nodeId: "n1",
+      tenantId: "install-1",
+    });
+    assert.equal(ackCalls, 0);
+    assert.equal(blockedAck.serverDurableAck, false);
+
+    // 2nd sync: event #1 now available -> exclusive from_sequence=0 fills gap without Social replay
+    returnEvent1 = true;
+    const second = await syncAssignedCampaignData(api, node.sqlite, {
+      nodeId: "n1",
+      tenantId: "install-1",
+      campaignId: "c-gap",
+      assignmentGeneration: 1,
+    });
+    assert.equal(second.lastAppliedSequence, 3);
+    assert.equal(second.gapCount, 0);
+    assert.equal(second.pendingRecovery, false);
+    assert.ok(seenFrom.every((f) => f === 0));
+
+    const plan = await node.runRecovery();
+    assert.equal(plan?.replaySocialActions, false);
+
+    const acked = await flushDurableAcks(api, node.sqlite, {
+      nodeId: "n1",
+      tenantId: "install-1",
+    });
+    assert.equal(ackCalls, 1);
+    assert.equal(acked.serverDurableAck, true);
+    assert.equal(acked.lastServerAckSequence, 3);
+    node.destroy();
+  });
+});
+
+test("snapshot event_sequence_head is stored separately from contiguous applied cursor", async () => {
+  await withTempDir(async (dir) => {
+    const conn = createMockConnection(async (subpath) => {
+      if (subpath.includes("/snapshot")) {
+        return {
+          ok: true,
+          protocol_version: KEEPALIVE_PROTOCOL_VERSION,
+          schema_version: KEEPALIVE_SCHEMA_VERSION,
+          tenant_id: "install-1",
+          node_id: "n1",
+          assignment_generation: 1,
+          campaign_id: "c-head",
+          snapshot_version: 9,
+          event_sequence_head: 9,
+          campaign: { campaign_id: "c-head", name: "test wp 3", status: "running" },
+          content_counts: { running: 1 },
+          job_counts: { reserved: 1 },
+        };
+      }
+      if (subpath.includes("/events")) {
+        return envelope({
+          node_id: "n1",
+          tenant_id: "install-1",
+          campaign_id: "c-head",
+          assignment_generation: 1,
+          events: [],
+          event_sequence_head: 9,
+        });
+      }
+      throw new Error(subpath);
+    });
+
+    const { node } = await bootNode(dir, "n1", conn);
+    await node.assignCampaign({
+      tenantId: "install-1",
+      campaignId: "c-head",
+      assignmentGeneration: 1,
+    });
+    const api = new KeepAliveHttpApi(conn as never);
+    const out = await syncAssignedCampaignData(api, node.sqlite, {
+      nodeId: "n1",
+      tenantId: "install-1",
+      campaignId: "c-head",
+      assignmentGeneration: 1,
+    });
+
+    assert.equal(out.snapshotOk, true);
+    assert.equal(out.eventSequenceHead, 9);
+    assert.equal(out.lastAppliedSequence, 0);
+    assert.equal(out.pendingRecovery, true);
+    const cursor = node.sqlite.getCursor("install-1", "c-head");
+    assert.equal(cursor?.lastAppliedSequence, 0);
+    assert.equal(cursor?.lastSeenSequence, 9);
+    const snap = node.sqlite.getSnapshot("install-1", "c-head");
+    assert.equal((snap?.metadata.campaign as Record<string, unknown>)?.name, "test wp 3");
+    node.destroy();
+  });
 });
