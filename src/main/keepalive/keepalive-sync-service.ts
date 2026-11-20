@@ -95,6 +95,17 @@ export class KeepAliveSyncService {
       getNodeId: () => this.node.getNodeId(),
       isEnabled: () => this.node.isEnabled(),
       isOnline: () => this.connection.isOnline(),
+      getTicketContext: () => {
+        const nodeId = this.node.getNodeId();
+        if (!nodeId) return null;
+        const assigned = this.node.sqlite.listAssignments(nodeId, "assigned");
+        if (assigned.length === 0) return null;
+        const assignmentGeneration = Math.max(...assigned.map((a) => a.assignmentGeneration));
+        return {
+          assignmentGeneration,
+          campaignIds: assigned.map((a) => a.campaignId),
+        };
+      },
       getGatewayOverride: () => {
         const env = process.env.RPA_KEEPALIVE_SOCKET_GATEWAY?.trim();
         if (env) return env.replace(/\/+$/, "");

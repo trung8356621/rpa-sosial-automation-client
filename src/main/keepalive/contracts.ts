@@ -60,7 +60,11 @@ export type KeepAliveSocketStatus =
   | "protocol_mismatch"
   | "stopped";
 
-/** Realtime notification event names (hints only). */
+/**
+ * Realtime notification event names (hints only).
+ * Server 56bc338 emits ka.notify / ka.assignment_changed / ka.route_invalidated.
+ * ka.recover_hint is optional (not currently emitted).
+ */
 export const KEEPALIVE_SOCKET_EVENTS = [
   "ka.notify",
   "ka.assignment_changed",
@@ -70,7 +74,11 @@ export const KEEPALIVE_SOCKET_EVENTS = [
 
 export type KeepAliveSocketEventName = (typeof KEEPALIVE_SOCKET_EVENTS)[number];
 
+/** Socket hint envelope version (field `v`). */
+export const KEEPALIVE_SOCKET_ENVELOPE_V = 2;
+
 export const KEEPALIVE_SOCKET_PATH_DEFAULT = "/keepalive/socket.io/";
+export const KEEPALIVE_SOCKET_ROLE = "recovery";
 
 /** Keys forbidden in Campaign snapshot metadata (secrets / browser identity). */
 export const SENSITIVE_SNAPSHOT_KEYS = [

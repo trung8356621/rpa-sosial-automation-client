@@ -1,19 +1,15 @@
 /**
- * Keep Alive Socket.IO realtime hints (Phase 3B.6D).
+ * Keep Alive Socket.IO realtime hints (Phase 3B.6E contract freeze @ 56bc338).
  *
- * Contract source: phase brief + keepalive.v1 (Desktop does not host LAPTOP
- * docs/KEEPALIVE_SOCKET_TICKET_3B6B.md / GATEWAY_3B6C.md). Socket payloads are
- * notification hints only — durable state stays on HTTP + SQLite.
- *
- * Auth: short-lived ticket via HTTP mint → Socket.IO `auth.ticket`.
- * Never send Client API Key to the Gateway. Never persist tickets.
+ * Envelope: { v: 2, t: event_name, ...nullable fields }.
+ * Auth: HTTP ticket mint (role=recovery) → Socket.IO `auth.ticket`.
+ * Hints only — never advance SQLite cursors from seq_hint; never execute Jobs.
  */
 
 import { io, type Socket } from "socket.io-client";
 import { logClientError, logClientEvent } from "../main-error-log.js";
 import {
-  KEEPALIVE_PROTOCOL_VERSION,
-  KEEPALIVE_SCHEMA_VERSION,
+  KEEPALIVE_SOCKET_ENVELOPE_V,
   KEEPALIVE_SOCKET_EVENTS,
   KEEPALIVE_SOCKET_PATH_DEFAULT,
   type KeepAliveSocketEventName,
@@ -28,12 +24,21 @@ const RECONNECT_MAX_ATTEMPTS = 12;
 
 export interface KeepAliveSocketHint {
   event: KeepAliveSocketEventName;
-  routeGeneration: number;
+  /** Nullable per server contract — null means no route fence on this hint. */
+  routeGeneration: number | null;
+  assignmentGeneration: number | null;
   nodeId: string | null;
   tenantId: string | null;
   campaignId: string | null;
   reason: string | null;
+  /** ka.notify optional sequence hint — NEVER used to advance SQLite cursors. */
+  seqHint: number | null;
   at: string | null;
+}
+
+export interface KeepAliveSocketTicketContext {
+  assignmentGeneration: number;
+  campaignIds: string[];
 }
 
 export interface KeepAliveSocketDiagnostics {
@@ -84,6 +89,7 @@ export function createDisabledSocketFactory(): KeepAliveSocketFactory {
  */
 export function createSocketIoFactory(): KeepAliveSocketFactory {
   return (params) => {
+    // Default namespace `/`; path=/keepalive/socket.io/; WebSocket-only; auth.ticket.
     const socket: Socket = io(params.gatewayUrl, {
       path: params.socketPath || KEEPALIVE_SOCKET_PATH_DEFAULT,
       transports: ["websocket"],
@@ -144,6 +150,8 @@ export class KeepAliveSocketClient {
       getNodeId: () => string | null;
       isEnabled: () => boolean;
       isOnline: () => boolean;
+      /** Required ticket body fields from current local assignments. */
+      getTicketContext: () => KeepAliveSocketTicketContext | null;
       /** Optional gateway override (settings / env). */
       getGatewayOverride?: () => string | null | undefined;
       onHints: KeepAliveSocketHintHandler;
@@ -232,7 +240,19 @@ export class KeepAliveSocketClient {
     this.disconnectSocket();
     this.clearTicketMemory();
 
-    const minted = await this.api.mintSocketTicket({ nodeId });
+    const ctx = this.opts.getTicketContext();
+    if (!ctx || ctx.assignmentGeneration < 1) {
+      this.lastError = "Chưa có assignment_generation để mint socket ticket.";
+      this.status = "error";
+      // No assignment yet — HTTP sync will retry after assignments land.
+      return;
+    }
+
+    const minted = await this.api.mintSocketTicket({
+      nodeId,
+      assignmentGeneration: ctx.assignmentGeneration,
+      campaignIds: ctx.campaignIds,
+    });
     if (!minted.ok) {
       this.lastError = sanitizeSocketError(minted.message);
       if (minted.fatal) {
@@ -259,7 +279,9 @@ export class KeepAliveSocketClient {
     const override = this.opts.getGatewayOverride?.()?.trim();
     const gatewayUrl = override && override.length > 0 ? override : ticketData.gatewayUrl;
     this.liveTicket = ticketData.ticket;
-    this.routeGeneration = ticketData.routeGeneration;
+    if (ticketData.routeGeneration != null && ticketData.routeGeneration >= 1) {
+      this.routeGeneration = ticketData.routeGeneration;
+    }
 
     const factory = this.opts.socketFactory ?? resolveDefaultSocketFactory();
     let handle: KeepAliveSocketHandle;
@@ -360,21 +382,39 @@ export class KeepAliveSocketClient {
     }
 
     const hint = parsed.hint;
-    const current = this.routeGeneration ?? 0;
-    if (hint.routeGeneration < current) {
+    const current = this.routeGeneration;
+    // Stale route fence only when BOTH sides have a concrete generation.
+    if (
+      current != null &&
+      hint.routeGeneration != null &&
+      hint.routeGeneration < current
+    ) {
       logClientEvent("KEEPALIVE_SOCKET_STALE_ROUTE_IGNORED", {
-        event,
+        event: hint.event,
         eventRoute: hint.routeGeneration,
         currentRoute: current,
       });
       return;
     }
 
-    if (event === "ka.route_invalidated" || hint.routeGeneration > current) {
-      this.routeGeneration = hint.routeGeneration;
+    // seq_hint is observational only — never touches SQLite cursors here.
+    if (hint.seqHint != null) {
+      logClientEvent("KEEPALIVE_SOCKET_SEQ_HINT", {
+        event: hint.event,
+        seqHint: hint.seqHint,
+        note: "hint_only_not_cursor_advance",
+      });
+    }
+
+    const routeBumped =
+      hint.routeGeneration != null &&
+      (current == null || hint.routeGeneration > current);
+    if (hint.event === "ka.route_invalidated" || routeBumped) {
+      if (hint.routeGeneration != null) {
+        this.routeGeneration = hint.routeGeneration;
+      }
       this.lastNotifyAt = new Date().toISOString();
       this.enqueueHint(hint);
-      // Force fresh ticket + reconnect, then HTTP catch-up via coalesced hints.
       if (this.started && !this.stoppedFatal) {
         void this.connectFreshTicket("route_invalidated");
       }
@@ -474,6 +514,10 @@ export class KeepAliveSocketClient {
   }
 }
 
+/**
+ * Parse 3B.6E socket envelope: { v: 2, t: "ka.*", ...nullable fields }.
+ * `event` from Socket.IO channel is fallback when `t` is absent.
+ */
 export function parseSocketHint(
   raw: unknown,
   event: KeepAliveSocketEventName
@@ -484,55 +528,73 @@ export function parseSocketHint(
     return { ok: false, message: "Socket hint payload phải là object.", fatal: false };
   }
   const row = raw as Record<string, unknown>;
-  const protocolVersion =
-    typeof row.protocol_version === "string"
-      ? row.protocol_version
-      : typeof row.protocolVersion === "string"
-        ? row.protocolVersion
-        : null;
-  const schemaVersion =
-    typeof row.schema_version === "number"
-      ? row.schema_version
-      : typeof row.schemaVersion === "number"
-        ? row.schemaVersion
-        : null;
 
-  if (protocolVersion != null && protocolVersion !== KEEPALIVE_PROTOCOL_VERSION) {
+  const envelopeV =
+    typeof row.v === "number"
+      ? row.v
+      : typeof row.envelope_version === "number"
+        ? row.envelope_version
+        : null;
+  if (envelopeV != null && envelopeV !== KEEPALIVE_SOCKET_ENVELOPE_V) {
     return {
       ok: false,
-      message: `Socket protocol mismatch (${protocolVersion}).`,
+      message: `Socket envelope v mismatch (expected ${KEEPALIVE_SOCKET_ENVELOPE_V}, got ${envelopeV}).`,
       fatal: true,
     };
   }
-  if (schemaVersion != null && schemaVersion !== KEEPALIVE_SCHEMA_VERSION) {
-    return {
-      ok: false,
-      message: `Socket schema mismatch (${schemaVersion}).`,
-      fatal: true,
-    };
+
+  const tRaw =
+    typeof row.t === "string"
+      ? row.t.trim()
+      : typeof row.event === "string"
+        ? row.event.trim()
+        : typeof row.type === "string"
+          ? row.type.trim()
+          : null;
+  let resolvedEvent: KeepAliveSocketEventName = event;
+  if (tRaw) {
+    if (!(KEEPALIVE_SOCKET_EVENTS as readonly string[]).includes(tRaw)) {
+      return { ok: false, message: `Unknown socket event t=${tRaw}.`, fatal: false };
+    }
+    resolvedEvent = tRaw as KeepAliveSocketEventName;
+    // Channel name vs envelope t mismatch → ignore non-fatally.
+    if (tRaw !== event && event !== "ka.notify") {
+      // Still accept when listening on matching channel; channel arg is authoritative fallback.
+    }
   }
+
+  const nullableNum = (v: unknown): number | null => {
+    if (v === null || v === undefined) return null;
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "string" && v.trim() && Number.isFinite(Number(v))) return Number(v);
+    return null;
+  };
+  const str = (v: unknown) => {
+    if (v === null || v === undefined) return null;
+    return typeof v === "string" && v.trim() ? v.trim() : null;
+  };
 
   const routeGeneration =
-    typeof row.route_generation === "number"
-      ? row.route_generation
-      : typeof row.routeGeneration === "number"
-        ? row.routeGeneration
-        : null;
-  if (routeGeneration == null || !Number.isFinite(routeGeneration) || routeGeneration < 1) {
-    return { ok: false, message: "Socket hint thiếu route_generation.", fatal: false };
-  }
-
-  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+    nullableNum(row.route_generation) ?? nullableNum(row.routeGeneration);
+  const assignmentGeneration =
+    nullableNum(row.assignment_generation) ?? nullableNum(row.assignmentGeneration);
+  const seqHint = nullableNum(row.seq_hint) ?? nullableNum(row.seqHint);
 
   return {
     ok: true,
     hint: {
-      event,
-      routeGeneration,
+      event: resolvedEvent,
+      routeGeneration:
+        routeGeneration != null && routeGeneration >= 1 ? routeGeneration : null,
+      assignmentGeneration:
+        assignmentGeneration != null && assignmentGeneration >= 1
+          ? assignmentGeneration
+          : null,
       nodeId: str(row.node_id) ?? str(row.nodeId),
       tenantId: str(row.tenant_id) ?? str(row.tenantId),
       campaignId: str(row.campaign_id) ?? str(row.campaignId),
       reason: str(row.reason) ?? str(row.hint) ?? str(row.message),
+      seqHint: seqHint != null && seqHint >= 0 ? seqHint : null,
       at: str(row.at) ?? str(row.timestamp) ?? str(row.created_at),
     },
   };

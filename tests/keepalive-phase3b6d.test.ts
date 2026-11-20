@@ -184,15 +184,16 @@ function standardHandler(opts?: {
       if (opts?.ticketFail) throw opts.ticketFail;
       ticketN += 1;
       if (opts?.ticket) return opts.ticket(body);
-      return envelope({
+      return {
+        ticket: `ticket-${ticketN}`,
         node_id: "n1",
         tenant_id: "install-1",
-        ticket: `ticket-${ticketN}`,
+        role: "recovery",
+        assignment_generation: 1,
         expires_at: new Date(Date.now() + 60_000).toISOString(),
-        gateway_url: "https://seo-ops.test",
-        socket_path: "/keepalive/socket.io/",
+        gateway_url: "/keepalive/socket.io/",
         route_generation: 7,
-      });
+      };
     }
     if (subpath.includes("/snapshot")) {
       return envelope({
@@ -279,23 +280,31 @@ test("parse socket ticket; reject missing ticket / protocol", () => {
   if (!bad.ok) assert.equal(bad.code, "ticket_missing");
 });
 
-test("parseSocketHint validates route_generation and protocol", () => {
+test("parseSocketHint accepts nullable route; rejects wrong envelope v", () => {
   const ok = parseSocketHint(
-    envelope({
+    {
+      v: 2,
+      t: "ka.notify",
       route_generation: 2,
       campaign_id: "c1",
       reason: "events",
-    }),
+    },
     "ka.notify"
   );
   assert.equal(ok.ok, true);
 
-  const staleProto = parseSocketHint(
-    { protocol_version: "keepalive.v0", schema_version: 2, route_generation: 1 },
+  const nullable = parseSocketHint(
+    { v: 2, t: "ka.notify", route_generation: null, node_id: null, reason: null },
     "ka.notify"
   );
-  assert.equal(staleProto.ok, false);
-  if (!staleProto.ok) assert.equal(staleProto.fatal, true);
+  assert.equal(nullable.ok, true);
+
+  const badV = parseSocketHint(
+    { v: 1, t: "ka.notify", route_generation: 1 },
+    "ka.notify"
+  );
+  assert.equal(badV.ok, false);
+  if (!badV.ok) assert.equal(badV.fatal, true);
 });
 
 test("ticket mint + socket connect uses auth.ticket; never API key", async () => {
@@ -307,15 +316,16 @@ test("ticket mint + socket connect uses auth.ticket; never API key", async () =>
       standardHandler({
         ticket: (body) => {
           bodies.push(body ?? {});
-          return envelope({
+          return {
+            ticket: "fresh-ticket-1",
             node_id: "n1",
             tenant_id: "install-1",
-            ticket: "fresh-ticket-1",
+            role: "recovery",
+            assignment_generation: 1,
             expires_at: new Date(Date.now() + 60_000).toISOString(),
-            gateway_url: "https://seo-ops.test",
-            socket_path: "/keepalive/socket.io/",
+            gateway_url: "/keepalive/socket.io/",
             route_generation: 7,
-          });
+          };
         },
       }),
       createTrackingSocketFactory(sock)
@@ -324,6 +334,8 @@ test("ticket mint + socket connect uses auth.ticket; never API key", async () =>
     await sleep(30);
     assert.ok(bodies[0]);
     assert.equal(bodies[0].node_id, "n1");
+    assert.equal(bodies[0].role, "recovery");
+    assert.equal(bodies[0].assignment_generation, 1);
     assert.ok(!JSON.stringify(bodies[0]).includes("rpa_"));
     assert.deepEqual(sock.tickets, ["fresh-ticket-1"]);
     const diag = await node.getDiagnostics();
