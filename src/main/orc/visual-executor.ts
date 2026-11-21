@@ -1,11 +1,17 @@
 import type { WebContents } from "electron";
 import sharp from "sharp";
-import type { Payload, Rect, VisualEnvironment } from "./contracts.js";
+import type { Payload, Rect, ResolutionTrace, VisualEnvironment } from "./contracts.js";
 import { OrcBrowserHost } from "./browser-host.js";
+import {
+  inspectWordPressRememberMeCheckbox,
+  resolveCheckboxTargetKind,
+  type CheckboxState,
+} from "./checkbox-state.js";
 import { effectiveMatchTo } from "./match-to.js";
 import { advanceOcrSearch, clearOcrSearch } from "./ocr-match-scroll.js";
 import { localOcr, type OcrEngine } from "./ocr.js";
 import {
+  MIN_OCR_CONFIDENCE,
   normalizeTargetText,
   OcrNotFound,
   OcrTechnicalError,
@@ -78,9 +84,11 @@ export class VisualOrcExecutor {
     template: Buffer;
     text?: string;
     stepId?: string;
+    stepName?: string;
+    inspectCheckboxState?: () => Promise<CheckboxState>;
     signal?: AbortSignal;
   }): Promise<VisualStepOutcome> {
-    const { payload, template, text, stepId, signal } = params;
+    const { payload, template, text, stepId, stepName, signal } = params;
     const action = payload.action;
 
     if (action === "TYPE_ONLY") {
@@ -105,8 +113,38 @@ export class VisualOrcExecutor {
     let templateWidth: number | null = null;
     let templateHeight: number | null = null;
     let candidateCount = 0;
+    let bestOcrConfidence: number | null = null;
+    const requiredOcrConfidence = payload.target.ocr?.confirmed ? MIN_OCR_CONFIDENCE : null;
+    let templateMatchConfidence: number | null = null;
+    let selectedMatchingMethod: string | null = null;
+    let checkboxStateBefore: CheckboxState | null = null;
+    let checkboxStateAfter: CheckboxState | null = null;
+    let lastTrace: ResolutionTrace | undefined;
 
-    const emitDiagnostic = (matchResult: string, matchReason: string) => {
+    const recordTrace = (trace?: ResolutionTrace) => {
+      if (!trace) return;
+      lastTrace = trace;
+      for (const att of trace.attempts) {
+        if (att.method === "ocr" && typeof att.confidence === "number") {
+          bestOcrConfidence =
+            bestOcrConfidence == null ? att.confidence : Math.max(bestOcrConfidence, att.confidence);
+        }
+        if (att.method === "image" && typeof att.score === "number") {
+          templateMatchConfidence =
+            templateMatchConfidence == null
+              ? att.score
+              : Math.max(templateMatchConfidence, att.score);
+        }
+      }
+      if (trace.selectedMethod) selectedMatchingMethod = trace.selectedMethod;
+    };
+
+    const emitDiagnostic = (
+      matchResult: string,
+      matchReason: string,
+      failureReason: string | null = null
+    ) => {
+      recordTrace(lastTrace);
       logClientEvent("ORC_STEP_DIAGNOSTIC", {
         stepId: stepId ?? null,
         action,
@@ -120,12 +158,51 @@ export class VisualOrcExecutor {
         templateWidth,
         templateHeight,
         candidateCount,
+        bestOcrConfidence,
+        requiredOcrConfidence,
+        templateMatchConfidence,
+        selectedMatchingMethod,
+        checkboxStateBefore,
+        checkboxStateAfter,
         matchResult,
         matchReason,
+        failureReason,
       });
     };
 
+    const checkboxKind = resolveCheckboxTargetKind({
+      action,
+      stepName,
+      ocrText: payload.target.ocr?.text,
+    });
+    const inspectCheckbox =
+      checkboxKind === "wordpress_remember_me"
+        ? (params.inspectCheckboxState ??
+          (() => inspectWordPressRememberMeCheckbox(this.host.webContents)))
+        : null;
+
     try {
+      if (inspectCheckbox) {
+        checkboxStateBefore = await inspectCheckbox();
+        if (checkboxStateBefore === "unavailable") {
+          emitDiagnostic(
+            "checkbox_unavailable",
+            "checkbox_state_unavailable",
+            "CHECKBOX_STATE_UNAVAILABLE"
+          );
+          return {
+            kind: "error",
+            message: "CHECKBOX_STATE_UNAVAILABLE: không xác minh được trạng thái checkbox Remember Me.",
+          };
+        }
+        if (checkboxStateBefore === "checked") {
+          checkboxStateAfter = "checked";
+          selectedMatchingMethod = "already_checked";
+          emitDiagnostic("already_checked", "checkbox_already_checked");
+          return { kind: "ok", action, method: "already_checked" };
+        }
+      }
+
       const tplMeta = await sharp(template).metadata().catch(() => null);
       templateWidth = tplMeta?.width ?? null;
       templateHeight = tplMeta?.height ?? null;
@@ -212,18 +289,21 @@ export class VisualOrcExecutor {
                 candidateCount = Math.max(candidateCount, imgEvent.positions);
               }
             );
+            recordTrace(resolved.resolution);
             match = {
               x: resolved.x,
               y: resolved.y,
               method: resolved.method,
               score: resolved.score,
             };
+            selectedMatchingMethod = resolved.method ?? selectedMatchingMethod;
             break;
           } catch (error) {
+            if (error instanceof TargetNotConfident) recordTrace(error.resolution);
             if (error instanceof OcrTechnicalError) throw error;
             if (!matchTo || !(error instanceof OcrNotFound)) {
               if (error instanceof TargetNotConfident) {
-                emitDiagnostic("not_confident", error.message);
+                emitDiagnostic("not_confident", error.message, error.message);
                 return {
                   kind: "blocked",
                   code: "TARGET_NOT_CONFIDENT",
@@ -233,7 +313,7 @@ export class VisualOrcExecutor {
               throw error;
             }
             if (scrolls >= 40) {
-              emitDiagnostic("scroll_limit", error.message);
+              emitDiagnostic("scroll_limit", error.message, error.message);
               return {
                 kind: "blocked",
                 code: "SCROLL_LIMIT",
@@ -246,6 +326,7 @@ export class VisualOrcExecutor {
               this.host.zoom
             );
             if (!progress.moved) {
+              emitDiagnostic(progress.reason ?? "scroll_stalled", error.message, error.message);
               return {
                 kind: "blocked",
                 code: progress.reason ?? "SCROLL_STALLED",
@@ -262,12 +343,12 @@ export class VisualOrcExecutor {
       }
 
       if (!match) {
-        emitDiagnostic("not_found", "no_match");
+        emitDiagnostic("not_found", "no_match", "NOT_FOUND");
         return { kind: "blocked", code: "NOT_FOUND", message: "Không resolve được target." };
       }
 
-      emitDiagnostic("matched", match.method ?? "ok");
       if (action === "WAIT_VERIFY") {
+        emitDiagnostic("matched", match.method ?? "ok");
         return { kind: "ok", action, x: match.x, y: match.y, method: match.method };
       }
 
@@ -278,6 +359,24 @@ export class VisualOrcExecutor {
         // never log OCR text / credentials
         hasTextPayload: Boolean(text),
       });
+
+      if (inspectCheckbox) {
+        await sleep(80);
+        checkboxStateAfter = await inspectCheckbox();
+        if (checkboxStateAfter !== "checked") {
+          emitDiagnostic(
+            "checkbox_verify_failed",
+            match.method ?? "ok",
+            `CHECKBOX_VERIFY_FAILED:${checkboxStateAfter}`
+          );
+          return {
+            kind: "error",
+            message: `CHECKBOX_VERIFY_FAILED: đã click Remember Me nhưng trạng thái sau click là ${checkboxStateAfter}.`,
+          };
+        }
+      }
+
+      emitDiagnostic("matched", match.method ?? "ok");
 
       if (action === "CLICK_AND_TYPE") {
         await sleep(80);
@@ -290,7 +389,11 @@ export class VisualOrcExecutor {
       return { kind: "ok", action, x: match.x, y: match.y, method: match.method };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      emitDiagnostic(/Viewport|Screenshot viewport|Zoom/.test(message) ? "viewport_mismatch" : "error", message);
+      emitDiagnostic(
+        /Viewport|Screenshot viewport|Zoom/.test(message) ? "viewport_mismatch" : "error",
+        message,
+        message
+      );
       logClientError("ORC visual step failed", { action, error: message });
       if (/Viewport|Screenshot viewport|Zoom/.test(message)) {
         return { kind: "blocked", code: "VIEWPORT_MISMATCH", message };

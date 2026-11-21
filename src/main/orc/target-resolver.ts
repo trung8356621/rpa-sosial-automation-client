@@ -152,6 +152,65 @@ export async function resolveVisualTarget(
     }
     if (confident.length > 1)
       throw new TargetNotConfident("CONTEXT_AMBIGUOUS: nhiều mục tiêu cùng chữ nhưng context không phân biệt được; không click.", trace, true);
+
+    // OCR candidates existed but all failed MIN_OCR_CONFIDENCE (< 80):
+    // attempt strict template match (>= 0.96, non-ambiguous) when a valid template asset exists.
+    if (template.length > 0 && target.roi?.width > 0 && target.roi?.height > 0) {
+      const threshold = Math.max(0.96, payload.threshold ?? 0.96);
+      try {
+        const image = await matchTemplate(frame, template, target.roi, {
+          expand: true,
+          threshold,
+          onSearch: onImage,
+        });
+        const inRegion =
+          !searchRegion ||
+          (image.x >= searchRegion.x &&
+            image.x <= searchRegion.x + searchRegion.width &&
+            image.y >= searchRegion.y &&
+            image.y <= searchRegion.y + searchRegion.height);
+        trace.attempts.push({
+          method: "image",
+          outcome: image.ambiguous
+            ? "ambiguous"
+            : image.score >= threshold && inRegion
+              ? "matched"
+              : "not_confident",
+          score: image.score,
+          x: image.x,
+          y: image.y,
+          reason: image.ambiguous
+            ? "Ảnh có nhiều vị trí gần giống nhau."
+            : !inRegion
+              ? "Template match nằm ngoài vùng scroll."
+              : image.score < threshold
+                ? `Image score ${image.score.toFixed(4)} < ${threshold}.`
+                : "Strict template fallback matched.",
+        });
+        if (image.ambiguous) {
+          trace.blockedReason = "Target ảnh có nhiều vị trí; không click đoán.";
+          throw new TargetNotConfident(trace.blockedReason, trace, true);
+        }
+        if (image.score >= threshold && inRegion) {
+          trace.selectedMethod = "image";
+          trace.fallbackReason = "OCR_LOW_CONFIDENCE_TEMPLATE_FALLBACK";
+          return {
+            method: "image",
+            score: image.score,
+            x: image.x,
+            y: image.y,
+            resolution: trace,
+          };
+        }
+        trace.fallbackReason = `Image score ${image.score.toFixed(4)} < ${threshold}`;
+      } catch (err) {
+        if (err instanceof TargetNotConfident) throw err;
+        const msg = err instanceof Error ? err.message : String(err);
+        trace.attempts.push({ method: "image", outcome: "failed", reason: msg });
+        trace.fallbackReason = msg;
+      }
+    }
+
     throw new OcrNotFound(trace, "OCR_LOW_CONFIDENCE");
   }
   const trace: ResolutionTrace = {
