@@ -23,6 +23,7 @@ import {
   type BrowserClipboardIsolationHandle,
 } from "./browser-clipboard-isolation.js";
 import { BrowserInteractionLock } from "./browser-interaction-lock.js";
+import { EXECUTION_VIEWPORT, clampExecutionBounds } from "./execution-viewport.js";
 
 export class EmbeddedBrowser {
   private view: WebContentsView | null = null;
@@ -31,7 +32,12 @@ export class EmbeddedBrowser {
   private isLoading = false;
   private visible = false;
   private lastError: string | null = null;
-  private bounds = { x: 260, y: 120, width: 680, height: 560 };
+  private bounds: { x: number; y: number; width: number; height: number } = {
+    x: 260,
+    y: 120,
+    width: EXECUTION_VIEWPORT.width,
+    height: EXECUTION_VIEWPORT.height,
+  };
   private stateListeners = new Set<(state: BrowserViewState) => void>();
   private authOrchestrator: BrowserOpenOrchestrator | null = null;
   private authContextFinder: AuthContextFinder | null = null;
@@ -162,18 +168,22 @@ export class EmbeddedBrowser {
   }
 
   setBounds(bounds: { x: number; y: number; width: number; height: number }): void {
-    this.bounds = bounds;
+    const fixed = clampExecutionBounds(bounds);
+    this.bounds = fixed;
     if (this.view) {
-      this.view.setBounds(bounds);
+      this.view.setBounds(fixed);
+      if (!this.view.webContents.isDestroyed()) {
+        this.view.webContents.setZoomFactor(EXECUTION_VIEWPORT.zoom);
+      }
     }
-    this.interactionLock.setBounds(bounds);
+    this.interactionLock.setBounds(fixed);
   }
 
   getBounds(): { x: number; y: number; width: number; height: number } {
     return { ...this.bounds };
   }
 
-  /** Temporarily size the browser view for Creator Visual ORC (restore via restoreAuthViewport). */
+  /** Fixed 1024x560 execution viewport — keep stable across Auth / Visual ORC. */
   private boundsBeforeAuth: { x: number; y: number; width: number; height: number } | null = null;
 
   applyAuthViewport(size: { width: number; height: number }): void {
@@ -267,6 +277,13 @@ export class EmbeddedBrowser {
     await this.profileManager.setStatus(browserId, "running");
 
     const wc = view.webContents;
+    wc.setZoomFactor(EXECUTION_VIEWPORT.zoom);
+    void wc.setVisualZoomLevelLimits(1, 1).catch(() => {});
+    wc.on("did-finish-load", () => {
+      if (!wc.isDestroyed()) {
+        wc.setZoomFactor(EXECUTION_VIEWPORT.zoom);
+      }
+    });
 
     // Per-profile virtual clipboard — never writes/reads OS clipboard.
     this.clipboardIsolation?.dispose();

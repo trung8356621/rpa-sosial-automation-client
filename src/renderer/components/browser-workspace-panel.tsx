@@ -47,13 +47,14 @@ export function BrowserWorkspacePanel({
     if (!containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) {
+      // Fixed 1024x560 execution viewport — never stretch when window maximizes or resizes.
       void window.client.invoke({
         type: "setBrowserViewBounds",
         bounds: {
           x: Math.round(rect.left),
           y: Math.round(rect.top),
-          width: Math.round(rect.width),
-          height: Math.round(rect.height),
+          width: 1024,
+          height: 560,
         },
       });
     }

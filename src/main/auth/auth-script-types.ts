@@ -6,12 +6,43 @@ export type AuthResolutionSource =
   | "site_specific"
   | "cms_global";
 
+export interface AuthExecutionContext {
+  resolvedUrl?: string;
+  siteUrl?: string;
+  authPath?: string;
+  cmsType?: string;
+  source?: string;
+}
+
 export interface AuthTagContext {
   actionTagId?: number;
   actionTagKey?: string;
   resolutionSource?: AuthResolutionSource;
   cmsType?: string;
   siteId?: string;
+  executionContext?: AuthExecutionContext;
+}
+
+export function parseExecutionContext(
+  raw: unknown,
+  fallbackResolvedUrl?: unknown
+): AuthExecutionContext | undefined {
+  const obj = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+  const pick = (k1: string, k2: string) => {
+    const v = obj?.[k1] ?? obj?.[k2];
+    return typeof v === "string" && v.trim() ? v.trim() : undefined;
+  };
+  const resolvedUrl =
+    pick("resolved_url", "resolvedUrl") ??
+    (typeof fallbackResolvedUrl === "string" && fallbackResolvedUrl.trim()
+      ? fallbackResolvedUrl.trim()
+      : undefined);
+  const siteUrl = pick("site_url", "siteUrl");
+  const authPath = pick("auth_path", "authPath");
+  const cmsType = pick("cms_type", "cmsType");
+  const source = pick("source", "resolution_source");
+  if (!resolvedUrl && !siteUrl && !authPath && !cmsType && !source) return undefined;
+  return { resolvedUrl, siteUrl, authPath, cmsType, source };
 }
 
 export interface AuthReleaseIdentity {

@@ -8,6 +8,7 @@ import type { AccountCredentialSource } from "./credential-mapper.js";
 import { hasExplicitTagContext, type AuthReleasePulled, type AuthTagContext } from "./auth-script-types.js";
 import type { AuthPipelineResult } from "./outcomes.js";
 import type { AuthAssetDownloader } from "../orc/asset-store.js";
+import { isAtAuthTarget, validateAuthNavigationTarget } from "./auth-navigation.js";
 
 export type AuthRunnerLike = {
   run: (params: {
@@ -28,6 +29,7 @@ export type BrowserOpenAuthDeps = {
   resolver: AuthScriptResolver;
   loader: AuthScriptLoader;
   runner: AuthRunnerLike;
+  navigateToAuthUrl?: (url: string) => Promise<void>;
   downloadAsset?: AuthAssetDownloader;
   getViewBounds?: () => { x: number; y: number; width: number; height: number };
   applyViewport?: (bounds: { width: number; height: number }) => void | Promise<void>;
@@ -312,6 +314,124 @@ export class BrowserOpenOrchestrator {
         actionTagKey: expected.action_tag_key,
         authRuns: 0,
       };
+    }
+
+    const execCtx = resolved.executionContext ?? tag?.executionContext;
+    if (execCtx?.resolvedUrl) {
+      const validated = validateAuthNavigationTarget({
+        targetUrl: execCtx.resolvedUrl,
+        authorizedSiteUrl: execCtx.siteUrl ?? account.siteUrl,
+        expectedAuthPath: execCtx.authPath,
+      });
+      if (!validated.ok) {
+        logClientEvent("AUTH_FAILED", {
+          phase: "execute",
+          code: "AUTH_NAVIGATION_FAILED",
+          browserId,
+          reason: validated.reason,
+        });
+        return {
+          code: "AUTH_NAVIGATION_FAILED",
+          phase: "execute",
+          authExecutionOk: false,
+          checkpointStatus: initial.status,
+          message: validated.reason,
+          packageKey: expected.package_key,
+          releaseId: expected.release_id,
+          version: expected.version,
+          contentDigest: expected.content_digest,
+          actionTagId: expected.action_tag_id,
+          actionTagKey: expected.action_tag_key,
+          resolutionSource: tag?.resolutionSource,
+          authRuns: 0,
+        };
+      }
+
+      const currentUrl = typeof webContents.getURL === "function" ? webContents.getURL() : "";
+      if (!isAtAuthTarget(currentUrl, validated)) {
+        if (!this.deps.navigateToAuthUrl) {
+          logClientEvent("AUTH_FAILED", {
+            phase: "execute",
+            code: "AUTH_NAVIGATION_FAILED",
+            browserId,
+            reason: "navigate_handler_unavailable",
+          });
+          return {
+            code: "AUTH_NAVIGATION_FAILED",
+            phase: "execute",
+            authExecutionOk: false,
+            checkpointStatus: initial.status,
+            message: `Không thể điều hướng tới Auth URL (${validated.url}).`,
+            packageKey: expected.package_key,
+            releaseId: expected.release_id,
+            version: expected.version,
+            contentDigest: expected.content_digest,
+            actionTagId: expected.action_tag_id,
+            actionTagKey: expected.action_tag_key,
+            resolutionSource: tag?.resolutionSource,
+            authRuns: 0,
+          };
+        }
+        try {
+          logClientEvent("AUTH_NAVIGATE", {
+            browserId,
+            targetUrl: validated.url,
+            actionTagKey: expected.action_tag_key,
+            resolutionSource: tag?.resolutionSource ?? null,
+          });
+          await this.deps.navigateToAuthUrl(validated.url);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          logClientEvent("AUTH_FAILED", {
+            phase: "execute",
+            code: "AUTH_NAVIGATION_FAILED",
+            browserId,
+            targetUrl: validated.url,
+            reason,
+          });
+          return {
+            code: "AUTH_NAVIGATION_FAILED",
+            phase: "execute",
+            authExecutionOk: false,
+            checkpointStatus: initial.status,
+            message: `Điều hướng tới Auth URL thất bại (${validated.url}): ${reason}`,
+            packageKey: expected.package_key,
+            releaseId: expected.release_id,
+            version: expected.version,
+            contentDigest: expected.content_digest,
+            actionTagId: expected.action_tag_id,
+            actionTagKey: expected.action_tag_key,
+            resolutionSource: tag?.resolutionSource,
+            authRuns: 0,
+          };
+        }
+
+        const afterUrl = typeof webContents.getURL === "function" ? webContents.getURL() : "";
+        if (afterUrl && !isAtAuthTarget(afterUrl, validated)) {
+          logClientEvent("AUTH_FAILED", {
+            phase: "execute",
+            code: "AUTH_NAVIGATION_FAILED",
+            browserId,
+            expectedUrl: validated.url,
+            actualUrl: afterUrl,
+          });
+          return {
+            code: "AUTH_NAVIGATION_FAILED",
+            phase: "execute",
+            authExecutionOk: false,
+            checkpointStatus: initial.status,
+            message: `Trang sau điều hướng (${afterUrl}) không khớp Auth URL (${validated.url}).`,
+            packageKey: expected.package_key,
+            releaseId: expected.release_id,
+            version: expected.version,
+            contentDigest: expected.content_digest,
+            actionTagId: expected.action_tag_id,
+            actionTagKey: expected.action_tag_key,
+            resolutionSource: tag?.resolutionSource,
+            authRuns: 0,
+          };
+        }
+      }
     }
 
     // 2) Exactly one Auth attempt for this execution.

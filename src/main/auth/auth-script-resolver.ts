@@ -3,14 +3,16 @@ import type { ClientConnection } from "../connection/client-connection.js";
 import { mapServerErrorToCode, type AuthPipelineCode } from "./outcomes.js";
 import {
   hasExplicitTagContext,
+  parseExecutionContext,
   parseReleaseIdentity,
+  type AuthExecutionContext,
   type AuthReleaseIdentity,
   type AuthTagContext,
 } from "./auth-script-types.js";
 
 export type AuthResolveOutcome =
   | { kind: "no_tag_context" }
-  | { kind: "ok"; release: AuthReleaseIdentity }
+  | { kind: "ok"; release: AuthReleaseIdentity; executionContext?: AuthExecutionContext }
   | { kind: "no_auth_configured"; serverError?: string }
   | { kind: "error"; code: AuthPipelineCode; serverError?: string; message: string };
 
@@ -70,7 +72,9 @@ export class AuthScriptResolver {
           message: "Pinned release không phải Auth published.",
         };
       }
-      return { kind: "ok", release };
+      const executionContext =
+        parseExecutionContext(res.execution_context, res.resolved_url) ?? tag.executionContext;
+      return { kind: "ok", release, executionContext };
     } catch (err) {
       return this.mapHttpFailure(err);
     }

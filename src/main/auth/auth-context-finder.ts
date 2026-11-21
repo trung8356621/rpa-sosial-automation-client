@@ -2,7 +2,11 @@ import { SeoOpsHttpError } from "../../shared/seo-ops-http.js";
 import type { ClientConnection } from "../connection/client-connection.js";
 import { logClientEvent } from "../main-error-log.js";
 import { mapServerErrorToCode, type AuthPipelineCode } from "./outcomes.js";
-import type { AuthResolutionSource, AuthTagContext } from "./auth-script-types.js";
+import {
+  parseExecutionContext,
+  type AuthResolutionSource,
+  type AuthTagContext,
+} from "./auth-script-types.js";
 
 /**
  * Client ↔ Addon contract: POST /client/auth/context
@@ -240,7 +244,8 @@ function extractUniqueTag(res: Record<string, unknown>): AuthTagContext | null {
     typeof (res.site_id ?? res.siteId) === "string"
       ? String(res.site_id ?? res.siteId).trim() || undefined
       : undefined;
-  return { actionTagId, actionTagKey, resolutionSource, cmsType, siteId };
+  const executionContext = parseExecutionContext(res.execution_context, res.resolved_url);
+  return { actionTagId, actionTagKey, resolutionSource, cmsType, siteId, executionContext };
 }
 
 function extractCandidates(res: Record<string, unknown>): AuthContextCandidate[] {

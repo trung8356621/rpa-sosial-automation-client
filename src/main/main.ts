@@ -314,6 +314,7 @@ async function bootstrap() {
       getViewBounds: () => embeddedBrowser!.getBounds(),
       applyViewport: (size) => embeddedBrowser!.applyAuthViewport(size),
       restoreViewport: () => embeddedBrowser!.restoreAuthViewport(),
+      navigateToAuthUrl: (url) => embeddedBrowser!.navigate(url),
       downloadAsset: async (params) => {
         const { SeoOpsHttpError } = await import("../shared/seo-ops-http.js");
         try {
