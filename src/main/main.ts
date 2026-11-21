@@ -36,6 +36,7 @@ import { formatClientHttpError } from "../shared/seo-ops-http.js";
 import {
   acquireInstanceLock,
   parseDevInstanceId,
+  readDevInstanceConfig,
   resolveDevUserDataPath,
   type InstanceLockHandle,
 } from "./dev-instance.js";
@@ -63,6 +64,10 @@ app.setPath("sessionData", path.join(userDataPath, "chromium"));
 
 let devInstanceLock: InstanceLockHandle | null = null;
 if (devInstanceId) {
+  const devCfg = readDevInstanceConfig(userDataPath);
+  if (process.env.RPA_KEEPALIVE_SOCKET_ENABLE === undefined && typeof devCfg?.socketEnabled === "boolean") {
+    process.env.RPA_KEEPALIVE_SOCKET_ENABLE = devCfg.socketEnabled ? "1" : "0";
+  }
   try {
     devInstanceLock = acquireInstanceLock(userDataPath);
     app.on("will-quit", () => devInstanceLock?.release());

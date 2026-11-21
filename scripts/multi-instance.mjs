@@ -1,14 +1,30 @@
 #!/usr/bin/env node
 import { spawn, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, openSync, closeSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  openSync,
+  closeSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ALLOWED_INSTANCES = ["client-A", "client-B", "client-C"];
+const DEFAULT_INSTANCES = ["client-A", "client-B", "client-C"];
+const INSTANCE_PATTERN = /^client-[A-Za-z0-9_-]{1,32}$/;
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const instancesRoot = path.join(projectRoot, ".local", "instances");
 
 function instanceDir(id) {
-  return path.join(projectRoot, ".local", "instances", id);
+  return path.join(instancesRoot, id);
+}
+
+function configPath(id) {
+  return path.join(instanceDir(id), "instance.json");
 }
 
 function runnerPath(id) {
@@ -37,22 +53,48 @@ function readJsonSafe(file) {
   }
 }
 
-function getInstanceState(id) {
-  const dir = instanceDir(id);
-  const lock = readJsonSafe(lockPath(id));
-  const runner = readJsonSafe(runnerPath(id));
-  const pid = isPidAlive(lock?.pid) ? lock.pid : isPidAlive(runner?.pid) ? runner.pid : null;
-  const settings = readJsonSafe(path.join(dir, "settings.json"));
-  const sqlitePath = path.join(dir, "keepalive", "keepalive.sqlite");
-  return {
-    instanceId: id,
-    running: pid !== null,
-    pid,
-    userDataPath: dir,
-    socketEnabled: runner?.socketEnabled ?? false,
-    nodeId: settings?.keepAliveNodeId ?? null,
-    sqliteExists: existsSync(sqlitePath),
-  };
+function assertValidInstance(id) {
+  if (!id || !INSTANCE_PATTERN.test(id)) {
+    console.error(`Invalid instance "${id ?? ""}". Expected format: client-<id> (e.g. client-A, client-D)`);
+    process.exit(1);
+  }
+}
+
+function discoverInstances() {
+  const names = new Set(DEFAULT_INSTANCES);
+  if (existsSync(instancesRoot)) {
+    for (const entry of readdirSync(instancesRoot, { withFileTypes: true })) {
+      if (entry.isDirectory() && INSTANCE_PATTERN.test(entry.name)) {
+        names.add(entry.name);
+      }
+    }
+  }
+  return [...names].sort();
+}
+
+function getDesktopDir() {
+  if (process.platform === "win32") {
+    try {
+      const out = execFileSync(
+        "powershell.exe",
+        ["-NoProfile", "-Command", "[Environment]::GetFolderPath('Desktop')"],
+        { encoding: "utf8" }
+      ).trim();
+      if (out) return out;
+    } catch {
+      // fallback
+    }
+  }
+  return path.join(process.env.USERPROFILE || process.env.HOME || projectRoot, "Desktop");
+}
+
+function shortcutNameFor(id) {
+  const suffix = id.replace(/^client-/i, "");
+  return `RPA Client ${suffix}.lnk`;
+}
+
+function shortcutPathFor(id) {
+  return path.join(getDesktopDir(), shortcutNameFor(id));
 }
 
 function resolveElectronExe() {
@@ -63,16 +105,96 @@ function resolveElectronExe() {
   return path.join(projectRoot, "node_modules", ".bin", process.platform === "win32" ? "electron.cmd" : "electron");
 }
 
-function assertValidInstance(id) {
-  if (!ALLOWED_INSTANCES.includes(id)) {
-    console.error(`Invalid instance "${id}". Allowed: ${ALLOWED_INSTANCES.join(", ")}`);
-    process.exit(1);
+function createWindowsShortcut(id) {
+  if (process.platform !== "win32") {
+    console.log(`Shortcut creation skipped (non-Windows platform).`);
+    return null;
   }
+  const lnkPath = shortcutPathFor(id);
+  const exe = resolveElectronExe();
+  const args = `. --instance=${id}`;
+  const psScript = `
+$ws = New-Object -ComObject WScript.Shell
+$sc = $ws.CreateShortcut('${lnkPath.replace(/'/g, "''")}')
+$sc.TargetPath = '${exe.replace(/'/g, "''")}'
+$sc.Arguments = '${args.replace(/'/g, "''")}'
+$sc.WorkingDirectory = '${projectRoot.replace(/'/g, "''")}'
+$sc.Description = 'RPA Client (${id}) - Dev Multi-Instance (Claim OFF)'
+$sc.Save()
+`.trim();
+  execFileSync("powershell.exe", ["-NoProfile", "-Command", psScript], { stdio: "pipe" });
+  return lnkPath;
+}
+
+function getInstanceState(id) {
+  const dir = instanceDir(id);
+  const lock = readJsonSafe(lockPath(id));
+  const runner = readJsonSafe(runnerPath(id));
+  const cfg = readJsonSafe(configPath(id));
+  const pid = isPidAlive(lock?.pid) ? lock.pid : isPidAlive(runner?.pid) ? runner.pid : null;
+  const settings = readJsonSafe(path.join(dir, "settings.json"));
+  const sqlitePath = path.join(dir, "keepalive", "keepalive.sqlite");
+  const lnk = shortcutPathFor(id);
+  return {
+    instanceId: id,
+    running: pid !== null,
+    pid,
+    userDataPath: dir,
+    socketEnabled: cfg?.socketEnabled ?? runner?.socketEnabled ?? false,
+    nodeId: settings?.keepAliveNodeId ?? null,
+    sqliteExists: existsSync(sqlitePath),
+    shortcutExists: existsSync(lnk),
+    shortcutPath: lnk,
+  };
 }
 
 function parseFlag(args, prefix) {
   const hit = args.find((a) => a.startsWith(prefix));
   return hit ? hit.slice(prefix.length) : null;
+}
+
+function hasFlag(args, flag) {
+  return args.includes(flag);
+}
+
+function ensureInstanceManifest(id, socketOverride = null) {
+  const dir = instanceDir(id);
+  mkdirSync(path.join(dir, "logs"), { recursive: true });
+  const cfgFile = configPath(id);
+  const existing = readJsonSafe(cfgFile);
+  if (existing) {
+    // Idempotent: preserve existing profile data; only update socketEnabled if explicitly passed
+    if (socketOverride !== null && existing.socketEnabled !== socketOverride) {
+      const updated = { ...existing, socketEnabled: socketOverride, claimEnabled: false };
+      writeFileSync(cfgFile, JSON.stringify(updated, null, 2) + "\n", "utf8");
+      return { created: false, config: updated };
+    }
+    return { created: false, config: existing };
+  }
+  const createdCfg = {
+    instanceId: id,
+    socketEnabled: socketOverride ?? false,
+    claimEnabled: false,
+    createdAt: new Date().toISOString(),
+  };
+  writeFileSync(cfgFile, JSON.stringify(createdCfg, null, 2) + "\n", "utf8");
+  return { created: true, config: createdCfg };
+}
+
+function cmdCreate(id, args) {
+  assertValidInstance(id);
+  const socketFlag = parseFlag(args, "--socket=");
+  const socketOverride =
+    socketFlag != null ? socketFlag === "1" || socketFlag === "true" : null;
+  const { created, config } = ensureInstanceManifest(id, socketOverride);
+
+  let lnkPath = null;
+  if (hasFlag(args, "--shortcut")) {
+    lnkPath = createWindowsShortcut(id);
+  }
+  console.log(
+    `${created ? "Created" : "Preserved"} ${id} | userData=${instanceDir(id)} | socket=${config.socketEnabled ? "1" : "0"} | claim=OFF${lnkPath ? ` | shortcut=${lnkPath}` : ""}`
+  );
 }
 
 async function cmdStart(id, args) {
@@ -83,17 +205,14 @@ async function cmdStart(id, args) {
     process.exit(1);
   }
 
-  const prevRunner = readJsonSafe(runnerPath(id));
   const socketFlag = parseFlag(args, "--socket=");
-  const socketEnabled =
-    socketFlag != null
-      ? socketFlag === "1" || socketFlag === "true"
-      : Boolean(prevRunner?.socketEnabled ?? false);
+  const socketOverride =
+    socketFlag != null ? socketFlag === "1" || socketFlag === "true" : null;
+  const { config } = ensureInstanceManifest(id, socketOverride);
+  const socketEnabled = Boolean(config.socketEnabled);
 
   const dir = instanceDir(id);
-  const logsDir = path.join(dir, "logs");
-  mkdirSync(logsDir, { recursive: true });
-  const consoleLog = path.join(logsDir, "console.log");
+  const consoleLog = path.join(dir, "logs", "console.log");
   const outFd = openSync(consoleLog, "a");
 
   const exe = resolveElectronExe();
@@ -127,7 +246,6 @@ async function cmdStart(id, args) {
     "utf8"
   );
 
-  // Brief wait to confirm process stays alive
   await new Promise((r) => setTimeout(r, 800));
   if (!isPidAlive(child.pid)) {
     console.error(`Failed to start ${id}. Check ${consoleLog}`);
@@ -156,7 +274,7 @@ function killPidTree(pid) {
 }
 
 async function cmdStop(target) {
-  const ids = target === "all" ? ALLOWED_INSTANCES : [target];
+  const ids = target === "all" ? discoverInstances() : [target];
   for (const id of ids) {
     assertValidInstance(id);
     const state = getInstanceState(id);
@@ -193,11 +311,35 @@ function cmdLogs(id, args) {
   console.log(lines.slice(-linesCount).join("\n"));
 }
 
+function cmdDelete(id, args) {
+  assertValidInstance(id);
+  if (!hasFlag(args, "--confirm")) {
+    console.error(`Refusing to delete ${id} without explicit --confirm flag.`);
+    process.exit(1);
+  }
+  const state = getInstanceState(id);
+  if (state.running) {
+    console.error(`Cannot delete ${id} while running (PID ${state.pid}). Stop it first.`);
+    process.exit(1);
+  }
+  const dir = instanceDir(id);
+  if (existsSync(dir)) {
+    rmSync(dir, { recursive: true, force: true });
+    console.log(`Deleted instance directory ${dir}`);
+  } else {
+    console.log(`Instance directory not found: ${dir}`);
+  }
+  if (existsSync(state.shortcutPath)) {
+    unlinkSync(state.shortcutPath);
+    console.log(`Deleted Desktop shortcut ${state.shortcutPath}`);
+  }
+}
+
 function cmdList() {
-  for (const id of ALLOWED_INSTANCES) {
+  for (const id of discoverInstances()) {
     const s = getInstanceState(id);
     console.log(
-      `${s.instanceId}: ${s.running ? `RUNNING (pid=${s.pid})` : "STOPPED"} | socket=${s.socketEnabled ? "1" : "0"} | nodeId=${s.nodeId ?? "-"} | sqlite=${s.sqliteExists ? "yes" : "no"} | userData=${s.userDataPath}`
+      `${s.instanceId}: ${s.running ? `RUNNING (pid=${s.pid})` : "STOPPED"} | socket=${s.socketEnabled ? "1" : "0"} | nodeId=${s.nodeId ?? "-"} | sqlite=${s.sqliteExists ? "yes" : "no"} | shortcut=${s.shortcutExists ? "yes" : "no"} | userData=${s.userDataPath}`
     );
   }
 }
@@ -205,16 +347,21 @@ function cmdList() {
 function printHelp() {
   console.log(`Usage: node scripts/multi-instance.mjs <command> [instance] [options]
 Commands:
-  start <client-A|client-B|client-C> [--socket=0|1]
-  stop <client-A|client-B|client-C|all>
-  offline <client-A|client-B|client-C>
-  restart <client-A|client-B|client-C> [--socket=0|1]
-  logs <client-A|client-B|client-C> [--lines=50]
+  create <client-X> [--socket=0|1] [--shortcut]
+  start <client-X> [--socket=0|1]
+  stop <client-X|all>
+  offline <client-X>
+  restart <client-X> [--socket=0|1]
+  logs <client-X> [--lines=50]
+  delete <client-X> --confirm
   list`);
 }
 
 const [, , cmd, target, ...rest] = process.argv;
 switch (cmd) {
+  case "create":
+    cmdCreate(target, rest);
+    break;
   case "start":
     await cmdStart(target, rest);
     break;
@@ -227,6 +374,9 @@ switch (cmd) {
     break;
   case "logs":
     cmdLogs(target, rest);
+    break;
+  case "delete":
+    cmdDelete(target, rest);
     break;
   case "list":
   case "status":

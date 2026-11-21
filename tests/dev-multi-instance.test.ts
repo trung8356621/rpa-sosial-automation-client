@@ -7,18 +7,20 @@ import {
   ALLOWED_DEV_INSTANCES,
   acquireInstanceLock,
   parseDevInstanceId,
+  readDevInstanceConfig,
   resolveDevUserDataPath,
 } from "../src/main/dev-instance.js";
 
-test("parseDevInstanceId supports default null, CLI/env overrides, and rejects unknown ids", () => {
+test("parseDevInstanceId supports default null, CLI/env overrides, future client-D/E, and rejects invalid ids", () => {
   assert.equal(parseDevInstanceId(["node", "main.js"], {}), null);
   assert.equal(parseDevInstanceId(["node", "main.js", "--instance=client-A"], {}), "client-A");
   assert.equal(parseDevInstanceId(["node", "main.js"], { RPA_DEV_INSTANCE: "client-B" }), "client-B");
   assert.equal(
-    parseDevInstanceId(["node", "main.js", "--instance=client-C"], { RPA_DEV_INSTANCE: "client-A" }),
-    "client-C"
+    parseDevInstanceId(["node", "main.js", "--instance=client-D"], { RPA_DEV_INSTANCE: "client-A" }),
+    "client-D"
   );
-  assert.throws(() => parseDevInstanceId(["node", "main.js", "--instance=client-Z"], {}), /Invalid dev instance/);
+  assert.equal(parseDevInstanceId(["node", "main.js", "--instance=client-E"], {}), "client-E");
+  assert.throws(() => parseDevInstanceId(["node", "main.js", "--instance=bad name"], {}), /Invalid dev instance/);
 });
 
 test("resolveDevUserDataPath isolates 3 dev instances without touching default .local/client", () => {
@@ -45,6 +47,19 @@ test("acquireInstanceLock prevents simultaneous use of same userData and allows 
     await writeFile(path.join(dir, "instance.lock"), JSON.stringify({ pid: 999999 }), "utf8");
     const lock3 = acquireInstanceLock(dir, process.pid);
     lock3.release();
+
+    // readDevInstanceConfig reads persisted socketEnabled without throwing when absent
+    assert.equal(readDevInstanceConfig(dir), null);
+    await writeFile(
+      path.join(dir, "instance.json"),
+      JSON.stringify({ instanceId: "client-D", socketEnabled: true, claimEnabled: false }),
+      "utf8"
+    );
+    assert.deepEqual(readDevInstanceConfig(dir), {
+      instanceId: "client-D",
+      socketEnabled: true,
+      claimEnabled: false,
+    });
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }

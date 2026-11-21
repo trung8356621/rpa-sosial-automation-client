@@ -2,10 +2,28 @@ import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 export const ALLOWED_DEV_INSTANCES = ["client-A", "client-B", "client-C"] as const;
-export type DevInstanceId = (typeof ALLOWED_DEV_INSTANCES)[number];
+export type DevInstanceId = string;
+const DEV_INSTANCE_PATTERN = /^client-[A-Za-z0-9_-]{1,32}$/;
 
 export function isAllowedDevInstance(value: string | undefined | null): value is DevInstanceId {
-  return Boolean(value && (ALLOWED_DEV_INSTANCES as readonly string[]).includes(value));
+  return Boolean(value && DEV_INSTANCE_PATTERN.test(value));
+}
+
+export interface DevInstanceConfig {
+  instanceId?: string;
+  socketEnabled?: boolean;
+  claimEnabled?: boolean;
+}
+
+export function readDevInstanceConfig(userDataPath: string): DevInstanceConfig | null {
+  try {
+    const raw = readFileSync(path.join(userDataPath, "instance.json"), "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return parsed as DevInstanceConfig;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -18,7 +36,7 @@ export function parseDevInstanceId(argv: readonly string[], env: NodeJS.ProcessE
   if (!raw) return null;
   if (!isAllowedDevInstance(raw)) {
     throw new Error(
-      `Invalid dev instance "${raw}". Allowed instances: ${ALLOWED_DEV_INSTANCES.join(", ")}`
+      `Invalid dev instance "${raw}". Expected format: client-<id> (e.g. client-A, client-D)`
     );
   }
   return raw;
