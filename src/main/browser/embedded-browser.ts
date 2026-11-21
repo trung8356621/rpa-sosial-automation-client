@@ -91,6 +91,7 @@ export class EmbeddedBrowser {
       lastError: this.lastError,
       lastAuthCode: this.lastAuthResult?.code ?? null,
       lastAuthMessage: this.lastAuthResult?.message ?? null,
+      lastAuthResolutionSource: this.lastAuthResult?.resolutionSource ?? null,
       automationLock: {
         mode: lock.mode,
         message: lock.message,
@@ -378,12 +379,32 @@ export class EmbeddedBrowser {
     try {
       let resolvedTag: AuthTagContext | null | undefined = tag;
       if (!hasExplicitTagContext(resolvedTag)) {
-        resolvedTag = await this.resolveTagFromAccountContext(accountId);
-        if (resolvedTag === null) {
-          // Ambiguous / hard error already recorded — Checkpoint only.
-          await runCheckpoint();
+        const ctxResolution = await this.resolveTagFromAccountContext(accountId, {
+          siteUrl: profile.accountBinding?.siteUrl,
+          platform: profile.platform,
+        });
+        if (ctxResolution.kind === "skip") {
+          // Preserve session detection and existing checkpoints without overwriting real status with NO_TAG_CONTEXT.
+          const cp = await runCheckpoint();
+          if (cp.status === "present") {
+            this.lastAuthResult = {
+              code: "SESSION_VALID",
+              phase: "checkpoint",
+              authExecutionOk: false,
+              checkpointStatus: "present",
+              message: "Session/Checkpoint hợp lệ — bỏ qua Authentication Script (0 lần).",
+              authRuns: 0,
+            };
+          } else {
+            this.lastAuthResult = {
+              ...ctxResolution.result,
+              checkpointStatus: cp.status,
+            };
+          }
+          this.notify();
           return;
         }
+        resolvedTag = ctxResolution.tag;
       }
 
       let username: string | null = null;
@@ -517,37 +538,55 @@ export class EmbeddedBrowser {
   }
 
   /**
-   * Profile Open bridge: Account ID → Addon auth/context → 0/1/N eligible tags.
-   * Returns undefined when none (manual login). Returns null when ambiguous/error (stop Auth).
+   * Profile Open bridge: Account ID / Site → Addon auth/context → 0/1/N eligible tags or not_required.
    */
   private async resolveTagFromAccountContext(
-    accountId: string
-  ): Promise<AuthTagContext | null | undefined> {
+    accountId: string,
+    opts?: { siteUrl?: string | null; platform?: string | null }
+  ): Promise<
+    | { kind: "tag"; tag: AuthTagContext | undefined }
+    | { kind: "skip"; result: AuthPipelineResult }
+  > {
     if (!this.authContextFinder) {
       logClientEvent("AUTH_SKIPPED", {
         reason: "no_auth_context_finder",
         accountId,
       });
-      return undefined;
+      return { kind: "tag", tag: undefined };
     }
 
-    const found = await this.authContextFinder.findForAccount(accountId);
-    if (found.kind === "none") {
-      this.lastAuthResult = {
-        code: "NO_AUTH_CONFIGURED",
-        phase: "skipped",
-        authExecutionOk: false,
-        checkpointStatus: "unknown",
-        message: found.message,
-        authRuns: 0,
+    const found = await this.authContextFinder.findForAccount(accountId, opts);
+    if (found.kind === "not_required") {
+      return {
+        kind: "skip",
+        result: {
+          code: "AUTH_NOT_REQUIRED",
+          phase: "skipped",
+          authExecutionOk: false,
+          checkpointStatus: "unknown",
+          message: found.message,
+          authRuns: 0,
+        },
       };
-      return undefined;
+    }
+    if (found.kind === "none") {
+      return {
+        kind: "skip",
+        result: {
+          code: "NO_AUTH_CONFIGURED",
+          phase: "skipped",
+          authExecutionOk: false,
+          checkpointStatus: "unknown",
+          message: found.message,
+          authRuns: 0,
+        },
+      };
     }
     if (found.kind === "unique") {
-      return found.tag;
+      return { kind: "tag", tag: found.tag };
     }
     if (found.kind === "ambiguous") {
-      this.lastAuthResult = {
+      const result: AuthPipelineResult = {
         code: "AUTH_CONTEXT_AMBIGUOUS",
         phase: "skipped",
         authExecutionOk: false,
@@ -556,10 +595,9 @@ export class EmbeddedBrowser {
         authRuns: 0,
       };
       this.lastError = found.message;
-      this.notify();
-      return null;
+      return { kind: "skip", result };
     }
-    this.lastAuthResult = {
+    const result: AuthPipelineResult = {
       code: found.code === "CLIENT_LEASE_INVALID" ? found.code : "AUTH_CONTEXT_UNAVAILABLE",
       phase: "skipped",
       authExecutionOk: false,
@@ -574,7 +612,7 @@ export class EmbeddedBrowser {
       code: found.code,
       accountId,
     });
-    return undefined;
+    return { kind: "skip", result };
   }
 
   private waitForHumanResume(signal?: AbortSignal): Promise<void> {

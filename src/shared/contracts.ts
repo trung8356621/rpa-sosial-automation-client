@@ -122,6 +122,7 @@ export interface BrowserViewState {
   /** Last Auth pipeline result code (safe diagnostic; no secrets). */
   lastAuthCode?: string | null;
   lastAuthMessage?: string | null;
+  lastAuthResolutionSource?: string | null;
   automationLock?: {
     mode: AutomationLockMode;
     message: string | null;

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
+import { formatAuthStatusDisplay } from "../../shared/auth-status";
 import {
   type BrowserProfile,
   type BrowserStateSnapshot,
@@ -430,14 +431,39 @@ export function BrowserWorkspacePanel({
         </div>
       )}
 
-      {viewState?.lastAuthCode && viewState.lastAuthCode !== "CHECKPOINT_PASSED" && viewState.lastAuthCode !== "SESSION_VALID" && (
-        <div className="browser-error-banner" style={{ fontSize: 12 }}>
-          <span>
-            Auth: <code>{viewState.lastAuthCode}</code>
-            {viewState.lastAuthMessage ? ` — ${viewState.lastAuthMessage}` : ""}
-          </span>
-        </div>
-      )}
+      {(() => {
+        const authDisplay = formatAuthStatusDisplay(
+          viewState?.lastAuthCode,
+          viewState?.lastAuthResolutionSource,
+          viewState?.lastAuthMessage
+        );
+        if (!authDisplay) return null;
+        return (
+          <div
+            className="browser-error-banner"
+            style={{
+              fontSize: 12,
+              background:
+                authDisplay.tone === "info"
+                  ? "rgba(59, 130, 246, 0.12)"
+                  : authDisplay.tone === "warning"
+                    ? "rgba(245, 158, 11, 0.14)"
+                    : undefined,
+              borderColor:
+                authDisplay.tone === "info"
+                  ? "rgba(59, 130, 246, 0.35)"
+                  : authDisplay.tone === "warning"
+                    ? "rgba(245, 158, 11, 0.4)"
+                    : undefined,
+            }}
+          >
+            <span>
+              <strong>{authDisplay.label}</strong> (<code>{viewState?.lastAuthCode}</code>):{" "}
+              {authDisplay.detail}
+            </span>
+          </div>
+        );
+      })()}
 
       {/* Page Load Failure Warning (if real error occurred) */}
       {viewState?.lastError && (

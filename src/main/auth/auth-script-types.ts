@@ -1,8 +1,17 @@
 /** Contract shapes for Client auth/resolve + auth/pull (CP8A OpenAPI). */
 
+export type AuthResolutionSource =
+  | "explicit"
+  | "account_pin"
+  | "site_specific"
+  | "cms_global";
+
 export interface AuthTagContext {
   actionTagId?: number;
   actionTagKey?: string;
+  resolutionSource?: AuthResolutionSource;
+  cmsType?: string;
+  siteId?: string;
 }
 
 export interface AuthReleaseIdentity {

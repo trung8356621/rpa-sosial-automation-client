@@ -2,7 +2,7 @@ import { SeoOpsHttpError } from "../../shared/seo-ops-http.js";
 import type { ClientConnection } from "../connection/client-connection.js";
 import { logClientEvent } from "../main-error-log.js";
 import { mapServerErrorToCode, type AuthPipelineCode } from "./outcomes.js";
-import type { AuthTagContext } from "./auth-script-types.js";
+import type { AuthResolutionSource, AuthTagContext } from "./auth-script-types.js";
 
 /**
  * Client ↔ Addon contract: POST /client/auth/context
@@ -18,6 +18,7 @@ export type AuthContextCandidate = {
 
 export type AuthContextFindOutcome =
   | { kind: "none"; count: 0; message: string }
+  | { kind: "not_required"; message: string }
   | { kind: "unique"; count: 1; tag: AuthTagContext; message: string }
   | {
       kind: "ambiguous";
@@ -40,7 +41,10 @@ export class AuthContextFinder {
     >
   ) {}
 
-  async findForAccount(accountId: string): Promise<AuthContextFindOutcome> {
+  async findForAccount(
+    accountId: string,
+    opts?: { siteUrl?: string | null; platform?: string | null }
+  ): Promise<AuthContextFindOutcome> {
     if (!accountId.trim()) {
       return {
         kind: "error",
@@ -66,13 +70,16 @@ export class AuthContextFinder {
     }
 
     try {
+      const body: Record<string, unknown> = {
+        connection_token: token,
+        account_id: accountId,
+      };
+      if (opts?.siteUrl?.trim()) body.site_url = opts.siteUrl.trim();
+      if (opts?.platform?.trim()) body.platform = opts.platform.trim();
       const res = await this.connection.requestWithAuth(
         "/api/v1/social-automation/client/auth/context",
         "POST",
-        {
-          connection_token: token,
-          account_id: accountId,
-        }
+        body
       );
       return parseAuthContextResponse(res, accountId);
     } catch (err) {
@@ -106,9 +113,20 @@ export function parseAuthContextResponse(
     };
   }
 
-  const match = String(res.match ?? "").trim().toLowerCase() as AuthContextMatch;
+  const match = String(res.match ?? "").trim().toLowerCase() as AuthContextMatch | "not_required";
   const count = Number(res.count);
   const safeCount = Number.isFinite(count) && count >= 0 ? Math.floor(count) : -1;
+
+  if (res.auth_required === false || match === "not_required") {
+    logClientEvent("AUTH_SKIPPED", {
+      reason: "auth_not_required",
+      accountId,
+    });
+    return {
+      kind: "not_required",
+      message: "Authentication not required.",
+    };
+  }
 
   if (match === "none" || safeCount === 0) {
     logClientEvent("AUTH_SKIPPED", {
@@ -137,6 +155,8 @@ export function parseAuthContextResponse(
       match: "unique",
       actionTagId: tag.actionTagId,
       actionTagKey: tag.actionTagKey,
+      resolutionSource: tag.resolutionSource ?? null,
+      cmsType: tag.cmsType ?? null,
       count: 1,
     });
     return {
@@ -171,6 +191,21 @@ export function parseAuthContextResponse(
   };
 }
 
+function extractResolutionSource(res: Record<string, unknown>): AuthResolutionSource | undefined {
+  if (res.cms_global === true || res.is_global_fallback === true) return "cms_global";
+  const raw = String(
+    res.resolution_source ?? res.auth_scope ?? res.scope ?? ""
+  )
+    .trim()
+    .toLowerCase();
+  if (raw === "account_pin" || raw === "account_hard_pin" || raw === "hard_pin") {
+    return "account_pin";
+  }
+  if (raw === "site_specific" || raw === "site") return "site_specific";
+  if (raw === "cms_global" || raw === "global" || raw === "global_fallback") return "cms_global";
+  return undefined;
+}
+
 function extractUniqueTag(res: Record<string, unknown>): AuthTagContext | null {
   const id = Number(res.action_tag_id);
   const key = typeof res.action_tag_key === "string" ? res.action_tag_key.trim() : "";
@@ -178,15 +213,34 @@ function extractUniqueTag(res: Record<string, unknown>): AuthTagContext | null {
     res.action_tag && typeof res.action_tag === "object"
       ? (res.action_tag as Record<string, unknown>)
       : null;
-  const nestedId = tagObj ? Number(tagObj.action_tag_id ?? tagObj.id) : 0;
+  const firstCandidate =
+    Array.isArray(res.candidates) && res.candidates.length === 1 && typeof res.candidates[0] === "object"
+      ? (res.candidates[0] as Record<string, unknown>)
+      : null;
+  const nestedId = tagObj
+    ? Number(tagObj.action_tag_id ?? tagObj.id)
+    : firstCandidate
+      ? Number(firstCandidate.action_tag_id ?? firstCandidate.id)
+      : 0;
   const nestedKey = tagObj
     ? String(tagObj.action_tag_key ?? tagObj.tag_key ?? "").trim()
-    : "";
+    : firstCandidate
+      ? String(firstCandidate.action_tag_key ?? firstCandidate.tag_key ?? "").trim()
+      : "";
 
   const actionTagId = Number.isFinite(id) && id > 0 ? id : nestedId > 0 ? nestedId : undefined;
   const actionTagKey = key || nestedKey || undefined;
   if (!actionTagId && !actionTagKey) return null;
-  return { actionTagId, actionTagKey };
+  const resolutionSource = extractResolutionSource(res);
+  const cmsType =
+    typeof (res.cms_type ?? res.cmsType) === "string"
+      ? String(res.cms_type ?? res.cmsType).trim() || undefined
+      : undefined;
+  const siteId =
+    typeof (res.site_id ?? res.siteId) === "string"
+      ? String(res.site_id ?? res.siteId).trim() || undefined
+      : undefined;
+  return { actionTagId, actionTagKey, resolutionSource, cmsType, siteId };
 }
 
 function extractCandidates(res: Record<string, unknown>): AuthContextCandidate[] {

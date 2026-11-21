@@ -151,6 +151,7 @@ export class BrowserOpenOrchestrator {
         message: "Session/Checkpoint hợp lệ — bỏ qua Authentication Script (0 lần).",
         actionTagId: tag?.actionTagId,
         actionTagKey: tag?.actionTagKey,
+        resolutionSource: tag?.resolutionSource,
         authRuns: 0,
       };
     }
@@ -178,6 +179,7 @@ export class BrowserOpenOrchestrator {
         message: `Checkpoint ${initial.status} — không chạy Auth (không suy ra logout).`,
         actionTagId: tag?.actionTagId,
         actionTagKey: tag?.actionTagKey,
+        resolutionSource: tag?.resolutionSource,
         authRuns: 0,
       };
     }
@@ -188,6 +190,7 @@ export class BrowserOpenOrchestrator {
       partition,
       actionTagId: tag?.actionTagId,
       actionTagKey: tag?.actionTagKey,
+      resolutionSource: tag?.resolutionSource ?? null,
       initialCheckpoint: initial.status,
     });
 
@@ -269,6 +272,7 @@ export class BrowserOpenOrchestrator {
         contentDigest: expected.content_digest,
         actionTagId: expected.action_tag_id,
         actionTagKey: expected.action_tag_key,
+        resolutionSource: tag?.resolutionSource,
         authRuns,
       };
     }
@@ -325,6 +329,7 @@ export class BrowserOpenOrchestrator {
         contentDigest: expected.content_digest,
         actionTagId: expected.action_tag_id,
         actionTagKey: expected.action_tag_key,
+        resolutionSource: tag?.resolutionSource,
         authRuns,
       };
     }
@@ -371,6 +376,7 @@ export class BrowserOpenOrchestrator {
         contentDigest: expected.content_digest,
         actionTagId: expected.action_tag_id,
         actionTagKey: expected.action_tag_key,
+        resolutionSource: tag?.resolutionSource,
         authRuns,
       };
     }
@@ -394,6 +400,7 @@ export class BrowserOpenOrchestrator {
         contentDigest: expected.content_digest,
         actionTagId: expected.action_tag_id,
         actionTagKey: expected.action_tag_key,
+        resolutionSource: tag?.resolutionSource,
         authRuns,
       };
     }
@@ -423,6 +430,7 @@ export class BrowserOpenOrchestrator {
         contentDigest: expected.content_digest,
         actionTagId: expected.action_tag_id,
         actionTagKey: expected.action_tag_key,
+        resolutionSource: tag?.resolutionSource,
         authRuns,
       };
     }
@@ -451,6 +459,7 @@ export class BrowserOpenOrchestrator {
         contentDigest: expected.content_digest,
         actionTagId: expected.action_tag_id,
         actionTagKey: expected.action_tag_key,
+        resolutionSource: tag?.resolutionSource,
         authRuns,
       };
     }
@@ -480,6 +489,7 @@ export class BrowserOpenOrchestrator {
         contentDigest: expected.content_digest,
         actionTagId: expected.action_tag_id,
         actionTagKey: expected.action_tag_key,
+        resolutionSource: tag?.resolutionSource,
         authRuns,
       };
     }
@@ -504,6 +514,7 @@ export class BrowserOpenOrchestrator {
         contentDigest: expected.content_digest,
         actionTagId: expected.action_tag_id,
         actionTagKey: expected.action_tag_key,
+        resolutionSource: tag?.resolutionSource,
         authRuns,
       };
     }
@@ -528,6 +539,7 @@ export class BrowserOpenOrchestrator {
         contentDigest: expected.content_digest,
         actionTagId: expected.action_tag_id,
         actionTagKey: expected.action_tag_key,
+        resolutionSource: tag?.resolutionSource,
         authRuns,
       };
     }
@@ -566,6 +578,7 @@ export class BrowserOpenOrchestrator {
         contentDigest: expected.content_digest,
         actionTagId: expected.action_tag_id,
         actionTagKey: expected.action_tag_key,
+        resolutionSource: tag?.resolutionSource,
         authRuns,
       };
     }

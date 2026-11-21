@@ -3,9 +3,12 @@
  * Checkpoint (session signal) remains authoritative for login success.
  */
 
+import type { AuthResolutionSource } from "./auth-script-types.js";
+
 export type AuthPipelineCode =
   | "NO_TAG_CONTEXT"
   | "NO_AUTH_CONFIGURED"
+  | "AUTH_NOT_REQUIRED"
   | "NO_ACCOUNT_TAG_ENTITLEMENT"
   | "CLIENT_LEASE_INVALID"
   | "AUTH_CONTEXT_UNAVAILABLE"
@@ -50,6 +53,7 @@ export interface AuthPipelineResult {
   contentDigest?: string;
   actionTagId?: number;
   actionTagKey?: string;
+  resolutionSource?: AuthResolutionSource;
   /** Server/error code when mapped from HTTP. */
   serverError?: string;
   /** Auth Script executions in this Browser Open (hard cap 1). */

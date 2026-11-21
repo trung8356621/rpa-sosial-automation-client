@@ -208,6 +208,7 @@ function getBrowserStateSnapshot(): BrowserStateSnapshot {
           visible: false,
           lastAuthCode: null,
           lastAuthMessage: null,
+          lastAuthResolutionSource: null,
           automationLock: { mode: "off", message: null, reason: null },
         },
   };
