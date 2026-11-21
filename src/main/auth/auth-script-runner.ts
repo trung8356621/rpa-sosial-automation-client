@@ -265,6 +265,7 @@ export class AuthScriptRunner {
             text,
             stepId: typeof step.id === "string" ? step.id : `step-${i}`,
             stepName: typeof step.name === "string" ? step.name : undefined,
+            authorizedSiteUrl: params.account.siteUrl,
             signal,
           });
           if (out.kind === "blocked" && out.code === "CANCELLED") {

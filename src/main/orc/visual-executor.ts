@@ -3,8 +3,10 @@ import sharp from "sharp";
 import type { Payload, Rect, ResolutionTrace, VisualEnvironment } from "./contracts.js";
 import { OrcBrowserHost } from "./browser-host.js";
 import {
-  inspectWordPressRememberMeCheckbox,
+  checkWordPressRememberMeCheckbox,
+  inspectWordPressRememberMeContext,
   resolveCheckboxTargetKind,
+  type CheckboxInspectResult,
   type CheckboxState,
 } from "./checkbox-state.js";
 import { effectiveMatchTo } from "./match-to.js";
@@ -85,10 +87,12 @@ export class VisualOrcExecutor {
     text?: string;
     stepId?: string;
     stepName?: string;
-    inspectCheckboxState?: () => Promise<CheckboxState>;
+    authorizedSiteUrl?: string | null;
+    inspectCheckboxState?: () => Promise<CheckboxState | CheckboxInspectResult>;
+    checkCheckbox?: () => Promise<boolean>;
     signal?: AbortSignal;
   }): Promise<VisualStepOutcome> {
-    const { payload, template, text, stepId, stepName, signal } = params;
+    const { payload, template, text, stepId, stepName, authorizedSiteUrl, signal } = params;
     const action = payload.action;
 
     if (action === "TYPE_ONLY") {
@@ -119,6 +123,8 @@ export class VisualOrcExecutor {
     let selectedMatchingMethod: string | null = null;
     let checkboxStateBefore: CheckboxState | null = null;
     let checkboxStateAfter: CheckboxState | null = null;
+    let executionMethod: "verified_dom" | "visual_orc" = "visual_orc";
+    let visualFallbackReason: string | null = null;
     let lastTrace: ResolutionTrace | undefined;
 
     const recordTrace = (trace?: ResolutionTrace) => {
@@ -139,10 +145,18 @@ export class VisualOrcExecutor {
       if (trace.selectedMethod) selectedMatchingMethod = trace.selectedMethod;
     };
 
+    const checkboxKind = resolveCheckboxTargetKind({
+      action,
+      stepName,
+      ocrText: payload.target.ocr?.text,
+    });
+    const checkboxTargetDetected = checkboxKind === "wordpress_remember_me";
+
     const emitDiagnostic = (
       matchResult: string,
       matchReason: string,
-      failureReason: string | null = null
+      failureReason: string | null = null,
+      finalStepOutcome: "ok" | "blocked" | "error" = matchResult === "matched" || matchResult === "already_checked" ? "ok" : "error"
     ) => {
       recordTrace(lastTrace);
       logClientEvent("ORC_STEP_DIAGNOSTIC", {
@@ -162,45 +176,73 @@ export class VisualOrcExecutor {
         requiredOcrConfidence,
         templateMatchConfidence,
         selectedMatchingMethod,
+        checkboxTargetDetected,
         checkboxStateBefore,
         checkboxStateAfter,
+        executionMethod,
+        visualFallbackReason,
         matchResult,
         matchReason,
         failureReason,
+        finalStepOutcome,
       });
     };
 
-    const checkboxKind = resolveCheckboxTargetKind({
-      action,
-      stepName,
-      ocrText: payload.target.ocr?.text,
-    });
-    const inspectCheckbox =
-      checkboxKind === "wordpress_remember_me"
-        ? (params.inspectCheckboxState ??
-          (() => inspectWordPressRememberMeCheckbox(this.host.webContents)))
-        : null;
+    const inspectCheckbox = checkboxTargetDetected
+      ? async (): Promise<CheckboxInspectResult> => {
+          if (params.inspectCheckboxState) {
+            const raw = await params.inspectCheckboxState();
+            return typeof raw === "string"
+              ? { state: raw, reason: raw === "unavailable" ? "unavailable" : "ok" }
+              : raw;
+          }
+          return inspectWordPressRememberMeContext(this.host.webContents, authorizedSiteUrl);
+        }
+      : null;
+
+    const toggleCheckbox = checkboxTargetDetected
+      ? (params.checkCheckbox ??
+        (() => checkWordPressRememberMeCheckbox(this.host.webContents, authorizedSiteUrl)))
+      : null;
 
     try {
       if (inspectCheckbox) {
-        checkboxStateBefore = await inspectCheckbox();
-        if (checkboxStateBefore === "unavailable") {
-          emitDiagnostic(
-            "checkbox_unavailable",
-            "checkbox_state_unavailable",
-            "CHECKBOX_STATE_UNAVAILABLE"
-          );
-          return {
-            kind: "error",
-            message: "CHECKBOX_STATE_UNAVAILABLE: không xác minh được trạng thái checkbox Remember Me.",
-          };
-        }
+        const beforeCtx = await inspectCheckbox();
+        checkboxStateBefore = beforeCtx.state;
         if (checkboxStateBefore === "checked") {
+          executionMethod = "verified_dom";
           checkboxStateAfter = "checked";
-          selectedMatchingMethod = "already_checked";
-          emitDiagnostic("already_checked", "checkbox_already_checked");
-          return { kind: "ok", action, method: "already_checked" };
+          selectedMatchingMethod = "verified_dom";
+          emitDiagnostic("already_checked", "checkbox_already_checked", null, "ok");
+          return { kind: "ok", action, method: "verified_dom" };
         }
+        if (checkboxStateBefore === "unchecked" && toggleCheckbox) {
+          executionMethod = "verified_dom";
+          selectedMatchingMethod = "verified_dom";
+          await toggleCheckbox();
+          await sleep(80);
+          const afterCtx = await inspectCheckbox();
+          checkboxStateAfter = afterCtx.state;
+          if (checkboxStateAfter !== "checked") {
+            emitDiagnostic(
+              "checkbox_verify_failed",
+              "verified_dom_toggle_failed",
+              `CHECKBOX_VERIFY_FAILED:${checkboxStateAfter}`,
+              "error"
+            );
+            return {
+              kind: "error",
+              message: `CHECKBOX_VERIFY_FAILED: Remember Me chưa ở trạng thái checked (${checkboxStateAfter}).`,
+            };
+          }
+          emitDiagnostic("matched", "verified_dom", null, "ok");
+          return { kind: "ok", action, method: "verified_dom" };
+        }
+        // No trustworthy DOM checkbox exists (absent / ambiguous / form_mismatch / unavailable):
+        // retain strict Visual ORC OCR/template matching.
+        executionMethod = "visual_orc";
+        visualFallbackReason =
+          beforeCtx.reason !== "ok" ? `dom_${beforeCtx.reason}` : "dom_unavailable";
       }
 
       const tplMeta = await sharp(template).metadata().catch(() => null);
@@ -362,12 +404,14 @@ export class VisualOrcExecutor {
 
       if (inspectCheckbox) {
         await sleep(80);
-        checkboxStateAfter = await inspectCheckbox();
+        const afterCtx = await inspectCheckbox();
+        checkboxStateAfter = afterCtx.state;
         if (checkboxStateAfter !== "checked") {
           emitDiagnostic(
             "checkbox_verify_failed",
             match.method ?? "ok",
-            `CHECKBOX_VERIFY_FAILED:${checkboxStateAfter}`
+            `CHECKBOX_VERIFY_FAILED:${checkboxStateAfter}`,
+            "error"
           );
           return {
             kind: "error",
@@ -376,7 +420,7 @@ export class VisualOrcExecutor {
         }
       }
 
-      emitDiagnostic("matched", match.method ?? "ok");
+      emitDiagnostic("matched", match.method ?? "ok", null, "ok");
 
       if (action === "CLICK_AND_TYPE") {
         await sleep(80);

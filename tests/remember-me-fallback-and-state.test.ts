@@ -3,7 +3,10 @@ import test from "node:test";
 import sharp from "sharp";
 import { resolveVisualTarget, OcrNotFound, TargetNotConfident } from "../src/main/orc/target-resolver.js";
 import { VisualOrcExecutor } from "../src/main/orc/visual-executor.js";
-import { resolveCheckboxTargetKind } from "../src/main/orc/checkbox-state.js";
+import {
+  inspectWordPressRememberMeContext,
+  resolveCheckboxTargetKind,
+} from "../src/main/orc/checkbox-state.js";
 import type { Payload } from "../src/main/orc/contracts.js";
 import { setLogListener } from "../src/main/main-error-log.js";
 
@@ -138,13 +141,15 @@ test("OCR low confidence + ambiguous template match rejects as TargetNotConfiden
   );
 });
 
-test("Remember Me checkbox state: unchecked -> click & verify; checked -> no click; unavailable -> fail", async () => {
+test("Remember Me execution order: verified_dom first (even with OCR_LOW_CONFIDENCE), visual_orc fallback when absent/ambiguous, origin isolation, and verify failure", async () => {
   const { frame, template } = await makeDistinctFrameAndTemplate();
   const logs: string[] = [];
   setLogListener((e) => logs.push(e.message));
 
   try {
-    let clickCalls = 0;
+    let domToggleCalls = 0;
+    let hostClickCalls = 0;
+    let ocrCalls = 0;
     let state: "unchecked" | "checked" | "unavailable" = "unchecked";
     const fakeHost = {
       bounds: { x: 0, y: 0, width: 1024, height: 560 },
@@ -152,6 +157,7 @@ test("Remember Me checkbox state: unchecked -> click & verify; checked -> no cli
       deviceScaleFactor: 1,
       webContents: {
         isDestroyed: () => false,
+        getURL: () => "https://baloquatang.com/wp-login.php",
         executeJavaScript: async () => ({}),
         executeJavaScriptInIsolatedWorld: async () => ({
           moved: false,
@@ -159,14 +165,14 @@ test("Remember Me checkbox state: unchecked -> click & verify; checked -> no cli
           searchRegion: { x: 0, y: 0, width: 1024, height: 560 },
         }),
       },
-      getSanitizedUrl: () => "https://site.test/wp-login.php",
+      getSanitizedUrl: () => "https://baloquatang.com/wp-login.php",
       setZoom: async () => {},
       capture: async () => ({
         id: "c1",
         width: 1024,
         height: 560,
         zoom: 1,
-        url: "https://site.test/wp-login.php",
+        url: "https://baloquatang.com/wp-login.php",
         timestamp: new Date().toISOString(),
         backend: "cdp-surface" as const,
         dataUrl: "",
@@ -174,65 +180,111 @@ test("Remember Me checkbox state: unchecked -> click & verify; checked -> no cli
       }),
       captureBuffer: () => frame,
       click: () => {
-        clickCalls += 1;
+        hostClickCalls += 1;
         state = "checked";
       },
     };
-    const fakeOcr = {
-      recognize: async () => ({
-        text: "Remember",
-        confidence: 71,
-        language: "vie+eng" as const,
-        segments: [
-          { id: "s1", text: "Remember", bbox: { x: 395, y: 410, width: 66, height: 11 }, confidence: 71 },
-        ],
-      }),
+    const lowConfidenceOcr = {
+      recognize: async () => {
+        ocrCalls += 1;
+        return {
+          text: "Remember",
+          confidence: 62,
+          language: "vie+eng" as const,
+          segments: [
+            { id: "s1", text: "Remember", bbox: { x: 395, y: 410, width: 66, height: 11 }, confidence: 62 },
+          ],
+        };
+      },
     };
 
-    const exec = new VisualOrcExecutor(fakeHost as never, fakeOcr as never);
+    const exec = new VisualOrcExecutor(fakeHost as never, lowConfidenceOcr as never);
 
-    // 1) Initially unchecked -> clicks once via template fallback and verifies checked
+    // 1) Unchecked valid WordPress checkbox + would-be OCR_LOW_CONFIDENCE -> verified_dom succeeds without calling OCR
     const r1 = await exec.executeVisualStep({
       stepId: "step-2",
       stepName: "remember",
+      authorizedSiteUrl: "https://baloquatang.com",
       payload: makeRememberPayload(),
       template,
-      inspectCheckboxState: async () => state,
+      inspectCheckboxState: async () => ({ state, reason: "ok" }),
+      checkCheckbox: async () => {
+        domToggleCalls += 1;
+        state = "checked";
+        return true;
+      },
     });
     assert.equal(r1.kind, "ok");
-    assert.equal(clickCalls, 1);
+    if (r1.kind === "ok") assert.equal(r1.method, "verified_dom");
+    assert.equal(domToggleCalls, 1);
+    assert.equal(ocrCalls, 0);
     const d1 = logs.filter((l) => l.startsWith("ORC_STEP_DIAGNOSTIC ")).pop()!;
-    assert.match(d1, /"bestOcrConfidence":71/);
-    assert.match(d1, /"requiredOcrConfidence":80/);
-    assert.match(d1, /"selectedMatchingMethod":"image"/);
+    assert.match(d1, /"checkboxTargetDetected":true/);
     assert.match(d1, /"checkboxStateBefore":"unchecked"/);
     assert.match(d1, /"checkboxStateAfter":"checked"/);
+    assert.match(d1, /"executionMethod":"verified_dom"/);
+    assert.match(d1, /"finalStepOutcome":"ok"/);
 
-    // 2) Initially checked -> does not click again
+    // 2) Initially checked -> does not click or toggle again
     const r2 = await exec.executeVisualStep({
       stepId: "step-2",
       stepName: "remember",
+      authorizedSiteUrl: "https://baloquatang.com",
       payload: makeRememberPayload(),
       template,
-      inspectCheckboxState: async () => "checked",
+      inspectCheckboxState: async () => ({ state: "checked", reason: "ok" }),
+      checkCheckbox: async () => {
+        domToggleCalls += 1;
+        return true;
+      },
     });
     assert.equal(r2.kind, "ok");
-    assert.equal(clickCalls, 1);
-    if (r2.kind === "ok") assert.equal(r2.method, "already_checked");
+    if (r2.kind === "ok") assert.equal(r2.method, "verified_dom");
+    assert.equal(domToggleCalls, 1);
 
-    // 3) Checkbox state unavailable -> fails explicitly
+    // 3) Checkbox toggle fails to become checked -> explicit CHECKBOX_VERIFY_FAILED
     const r3 = await exec.executeVisualStep({
       stepId: "step-2",
       stepName: "remember",
+      authorizedSiteUrl: "https://baloquatang.com",
       payload: makeRememberPayload(),
       template,
-      inspectCheckboxState: async () => "unavailable",
+      inspectCheckboxState: async () => ({ state: "unchecked", reason: "ok" }),
+      checkCheckbox: async () => false,
     });
     assert.equal(r3.kind, "error");
-    assert.match(r3.message, /CHECKBOX_STATE_UNAVAILABLE/);
-    assert.equal(clickCalls, 1);
+    assert.match(r3.message, /CHECKBOX_VERIFY_FAILED/);
 
-    // 4) Non-checkbox CLICK_TARGET (e.g. Log In) is completely unaffected
+    // 4) Checkbox absent/ambiguous -> retains strict Visual ORC matching (visual_orc) and does NOT silently skip
+    const r4 = await exec.executeVisualStep({
+      stepId: "step-2",
+      stepName: "remember",
+      authorizedSiteUrl: "https://baloquatang.com",
+      payload: makeRememberPayload(),
+      template,
+      inspectCheckboxState: async () => ({ state: "unavailable", reason: "absent" }),
+    });
+    assert.equal(r4.kind, "error");
+    assert.match(r4.message, /CHECKBOX_VERIFY_FAILED/);
+    assert.equal(hostClickCalls, 1);
+    assert.equal(ocrCalls, 1);
+    const d4 = logs.filter((l) => l.startsWith("ORC_STEP_DIAGNOSTIC ")).pop()!;
+    assert.match(d4, /"executionMethod":"visual_orc"/);
+    assert.match(d4, /"visualFallbackReason":"dom_absent"/);
+
+    // 5) Site/Browser origin mismatch -> inspectWordPressRememberMeContext refuses DOM match
+    const originCheck = await inspectWordPressRememberMeContext(
+      {
+        isDestroyed: () => false,
+        getURL: () => "https://other-site.com/wp-login.php",
+        executeJavaScript: async () => ({ state: "unchecked", reason: "ok" }),
+      },
+      "https://baloquatang.com"
+    );
+    assert.equal(originCheck.state, "unavailable");
+    assert.equal(originCheck.reason, "origin_mismatch");
+
+    // 6) Non-checkbox CLICK_TARGET (e.g. Log In) is completely unaffected
     assert.equal(
       resolveCheckboxTargetKind({ action: "CLICK_TARGET", stepName: "login", ocrText: "Log In" }),
       null
