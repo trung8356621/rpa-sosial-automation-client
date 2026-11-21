@@ -8,6 +8,7 @@ import { ClientCredentialStore } from "./storage/credential-store.js";
 import { DeviceManager } from "./device/device-manager.js";
 import { ClientConnection } from "./connection/client-connection.js";
 import { TrayManager } from "./app/tray-manager.js";
+import { resolveAppIconPath } from "./app/app-icon.js";
 import { NotificationOrchestrator } from "./app/notification-orchestrator.js";
 import {
   getWindowsNotificationStatus,
@@ -221,12 +222,14 @@ function broadcastBrowserState(): void {
 }
 
 function createWindow(): BrowserWindow {
+  const iconPath = resolveAppIconPath(project);
   const win = new BrowserWindow({
     width: 1040,
     height: 760,
     minWidth: 860,
     minHeight: 640,
     title: "RPA Execution Client V2",
+    ...(iconPath ? { icon: iconPath } : {}),
     backgroundColor: "#0d131f",
     webPreferences: {
       preload: path.join(root, "preload", "index.cjs"),
@@ -393,7 +396,8 @@ async function bootstrap() {
       notificationOrchestrator?.destroy();
       trayManager?.destroy();
       app.quit();
-    }
+    },
+    project
   );
   trayManager.initialize();
 

@@ -113,13 +113,18 @@ function createWindowsShortcut(id) {
   const lnkPath = shortcutPathFor(id);
   const exe = resolveElectronExe();
   const args = `. --instance=${id}`;
+  const icoPath = path.join(projectRoot, "assets", "rpa-automation-icon.ico");
+  const iconLine = existsSync(icoPath)
+    ? `$sc.IconLocation = '${icoPath.replace(/'/g, "''")},0'`
+    : "";
   const psScript = `
 $ws = New-Object -ComObject WScript.Shell
 $sc = $ws.CreateShortcut('${lnkPath.replace(/'/g, "''")}')
 $sc.TargetPath = '${exe.replace(/'/g, "''")}'
 $sc.Arguments = '${args.replace(/'/g, "''")}'
 $sc.WorkingDirectory = '${projectRoot.replace(/'/g, "''")}'
-$sc.Description = 'RPA Client (${id}) - Dev Multi-Instance (Claim OFF)'
+${iconLine}
+$sc.Description = 'RPA Execution Client V2 (${id}) - Dev Multi-Instance (Claim OFF)'
 $sc.Save()
 `.trim();
   execFileSync("powershell.exe", ["-NoProfile", "-Command", psScript], { stdio: "pipe" });

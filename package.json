@@ -1,9 +1,34 @@
 {
   "name": "rpa-client-v2",
+  "productName": "RPA Execution Client V2",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "dist/main/main.js",
+  "build": {
+    "appId": "com.rpa.client.v2",
+    "productName": "RPA Execution Client V2",
+    "files": [
+      "dist/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "assets",
+        "to": "assets"
+      }
+    ],
+    "win": {
+      "icon": "assets/rpa-automation-icon.ico"
+    },
+    "mac": {
+      "icon": "assets/rpa-automation-icon-512.png"
+    },
+    "linux": {
+      "icon": "assets/rpa-automation-icon-512.png"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.main.json && vite build",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit",

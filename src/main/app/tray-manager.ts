@@ -1,6 +1,7 @@
 import { app, Tray, Menu, nativeImage, BrowserWindow } from "electron";
 import path from "node:path";
 import type { ClientConnection } from "../connection/client-connection.js";
+import { resolveAppIconPath } from "./app-icon.js";
 
 export class TrayManager {
   private tray: Tray | null = null;
@@ -8,19 +9,24 @@ export class TrayManager {
   constructor(
     private readonly getMainWindow: () => BrowserWindow | null,
     private readonly connection: ClientConnection,
-    private readonly onQuit: () => void
+    private readonly onQuit: () => void,
+    private readonly projectRoot?: string
   ) {}
 
   initialize(): void {
     if (this.tray) return;
 
-    // Create a 16x16 icon in memory (transparent PNG with colored dot or simple icon)
-    const icon = nativeImage.createFromBuffer(
-      Buffer.from(
-        "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAA0SURBVDhPY/wPBAwUACYoTSRgVAMGBkKuo2FA5n8GBgYk9yMLkqsB2fxB00AYDYORakAwBwAA95sRz6v0n8kAAAAASUVORK5CYII=",
-        "base64"
-      )
-    );
+    const iconPath = this.projectRoot ? resolveAppIconPath(this.projectRoot) : null;
+    const loaded = iconPath ? nativeImage.createFromPath(iconPath) : null;
+    const icon =
+      loaded && !loaded.isEmpty()
+        ? loaded.resize({ width: 16, height: 16 })
+        : nativeImage.createFromBuffer(
+            Buffer.from(
+              "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAA0SURBVDhPY/wPBAwUACYoTSRgVAMGBkKuo2FA5n8GBgYk9yMLkqsB2fxB00AYDYORakAwBwAA95sRz6v0n8kAAAAASUVORK5CYII=",
+              "base64"
+            )
+          );
 
     this.tray = new Tray(icon);
     this.tray.setToolTip("RPA Client V2");
