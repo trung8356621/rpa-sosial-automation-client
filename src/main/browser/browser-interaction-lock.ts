@@ -2,6 +2,8 @@ import { WebContentsView, ipcMain, type BrowserWindow } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { logClientError, logClientEvent } from "../main-error-log.js";
+import { buildTransparentOverlayHtml } from "./execution-viewport.js";
+export { buildTransparentOverlayHtml };
 
 export type InteractionLockMode = "off" | "locked" | "human";
 
@@ -200,6 +202,8 @@ export class BrowserInteractionLock {
         backgroundThrottling: false,
       },
     });
+    // Transparent interaction-blocking layer: page remains visible, operator input is blocked.
+    view.setBackgroundColor("#00000000");
     this.overlay = view;
     view.setBounds(this.bounds);
     view.setVisible(true);
@@ -219,36 +223,7 @@ export class BrowserInteractionLock {
 
   private async renderOverlay(): Promise<void> {
     if (!this.overlay) return;
-    const msg = JSON.stringify(
-      this.message ?? "Automation đang chạy — Vui lòng không thao tác"
-    );
-    const html = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"/>
-<style>
-  html,body{margin:0;height:100%;width:100%;font-family:Segoe UI,sans-serif;background:rgba(15,23,42,.72);color:#f8fafc;user-select:none;-webkit-user-select:none;}
-  .wrap{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px;box-sizing:border-box;text-align:center;}
-  .msg{font-size:15px;font-weight:600;max-width:420px;line-height:1.4;}
-  button{cursor:pointer;border:0;border-radius:8px;padding:10px 16px;font-size:13px;font-weight:600;background:#ef4444;color:#fff;}
-  button:hover{background:#dc2626;}
-  button:focus{outline:2px solid #fca5a5;outline-offset:2px;}
-</style></head>
-<body>
-  <div class="wrap">
-    <div class="msg" id="msg"></div>
-    <button type="button" id="stop">Dừng automation</button>
-  </div>
-  <script>
-    document.getElementById('msg').textContent = ${msg};
-    document.getElementById('stop').addEventListener('click', function () {
-      if (window.__rpaAutomationLock && window.__rpaAutomationLock.stop) {
-        window.__rpaAutomationLock.stop();
-      }
-    });
-    // Capture wheel/drag so nothing reaches views below (overlay is topmost native view).
-    window.addEventListener('wheel', function(e){ e.preventDefault(); }, { passive: false });
-    window.addEventListener('dragstart', function(e){ e.preventDefault(); });
-  </script>
-</body></html>`;
+    const html = buildTransparentOverlayHtml();
     try {
       await this.overlay.webContents.loadURL(
         `data:text/html;charset=utf-8,${encodeURIComponent(html)}`

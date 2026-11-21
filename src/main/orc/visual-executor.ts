@@ -1,4 +1,5 @@
 import type { WebContents } from "electron";
+import sharp from "sharp";
 import type { Payload, Rect, VisualEnvironment } from "./contracts.js";
 import { OrcBrowserHost } from "./browser-host.js";
 import { effectiveMatchTo } from "./match-to.js";
@@ -76,9 +77,10 @@ export class VisualOrcExecutor {
     payload: Payload;
     template: Buffer;
     text?: string;
+    stepId?: string;
     signal?: AbortSignal;
   }): Promise<VisualStepOutcome> {
-    const { payload, template, text, signal } = params;
+    const { payload, template, text, stepId, signal } = params;
     const action = payload.action;
 
     if (action === "TYPE_ONLY") {
@@ -98,9 +100,40 @@ export class VisualOrcExecutor {
       return { kind: "error", message: `${action} thiếu target.asset` };
     }
 
+    let capturedWidth: number | null = null;
+    let capturedHeight: number | null = null;
+    let templateWidth: number | null = null;
+    let templateHeight: number | null = null;
+    let candidateCount = 0;
+
+    const emitDiagnostic = (matchResult: string, matchReason: string) => {
+      logClientEvent("ORC_STEP_DIAGNOSTIC", {
+        stepId: stepId ?? null,
+        action,
+        currentUrl: typeof this.host.getSanitizedUrl === "function" ? this.host.getSanitizedUrl() : "",
+        viewportWidth: this.host.bounds.width,
+        viewportHeight: this.host.bounds.height,
+        capturedWidth,
+        capturedHeight,
+        deviceScaleFactor: this.host.deviceScaleFactor ?? 1,
+        zoomFactor: this.host.zoom,
+        templateWidth,
+        templateHeight,
+        candidateCount,
+        matchResult,
+        matchReason,
+      });
+    };
+
     try {
+      const tplMeta = await sharp(template).metadata().catch(() => null);
+      templateWidth = tplMeta?.width ?? null;
+      templateHeight = tplMeta?.height ?? null;
+
       await this.prepareEnvironment(payload.target.environment);
       const before = await this.host.capture({ light: true });
+      capturedWidth = before.width;
+      capturedHeight = before.height;
       this.assertViewport(payload.target.environment, before);
 
       const mode = effectiveMatchTo(payload);
@@ -171,7 +204,12 @@ export class VisualOrcExecutor {
                       payload.target?.ocr?.text ?? ""
                     ).length,
                   });
+                } else if (event.phase === "result" && event.result) {
+                  candidateCount = event.result.segments.length;
                 }
+              },
+              (imgEvent) => {
+                candidateCount = Math.max(candidateCount, imgEvent.positions);
               }
             );
             match = {
@@ -185,6 +223,7 @@ export class VisualOrcExecutor {
             if (error instanceof OcrTechnicalError) throw error;
             if (!matchTo || !(error instanceof OcrNotFound)) {
               if (error instanceof TargetNotConfident) {
+                emitDiagnostic("not_confident", error.message);
                 return {
                   kind: "blocked",
                   code: "TARGET_NOT_CONFIDENT",
@@ -194,6 +233,7 @@ export class VisualOrcExecutor {
               throw error;
             }
             if (scrolls >= 40) {
+              emitDiagnostic("scroll_limit", error.message);
               return {
                 kind: "blocked",
                 code: "SCROLL_LIMIT",
@@ -222,9 +262,11 @@ export class VisualOrcExecutor {
       }
 
       if (!match) {
+        emitDiagnostic("not_found", "no_match");
         return { kind: "blocked", code: "NOT_FOUND", message: "Không resolve được target." };
       }
 
+      emitDiagnostic("matched", match.method ?? "ok");
       if (action === "WAIT_VERIFY") {
         return { kind: "ok", action, x: match.x, y: match.y, method: match.method };
       }
@@ -248,6 +290,7 @@ export class VisualOrcExecutor {
       return { kind: "ok", action, x: match.x, y: match.y, method: match.method };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      emitDiagnostic(/Viewport|Screenshot viewport|Zoom/.test(message) ? "viewport_mismatch" : "error", message);
       logClientError("ORC visual step failed", { action, error: message });
       if (/Viewport|Screenshot viewport|Zoom/.test(message)) {
         return { kind: "blocked", code: "VIEWPORT_MISMATCH", message };

@@ -28,6 +28,42 @@ export function imageToInput(
   };
 }
 
+export async function normalizeCaptureBufferToDip(
+  raw: Buffer,
+  bounds: Rect,
+  deviceScaleFactor: number
+): Promise<{ buffer: Buffer; width: number; height: number; rawWidth: number; rawHeight: number }> {
+  const metadata = await sharp(raw).metadata();
+  const rawWidth = metadata.width ?? bounds.width;
+  const rawHeight = metadata.height ?? bounds.height;
+  const dpr = Number.isFinite(deviceScaleFactor) && deviceScaleFactor > 0 ? deviceScaleFactor : 1;
+
+  if (
+    dpr > 1.01 &&
+    bounds.width > 0 &&
+    bounds.height > 0 &&
+    (rawWidth !== bounds.width || rawHeight !== bounds.height)
+  ) {
+    const expectedW = Math.round(bounds.width * dpr);
+    const expectedH = Math.round(bounds.height * dpr);
+    if (Math.abs(rawWidth - expectedW) <= 4 && Math.abs(rawHeight - expectedH) <= 4) {
+      const resized = await sharp(raw)
+        .resize(bounds.width, bounds.height, { fit: "fill" })
+        .png()
+        .toBuffer();
+      return {
+        buffer: resized,
+        width: bounds.width,
+        height: bounds.height,
+        rawWidth,
+        rawHeight,
+      };
+    }
+  }
+
+  return { buffer: raw, width: rawWidth, height: rawHeight, rawWidth, rawHeight };
+}
+
 /**
  * Client adapter for Creator Visual ORC I/O against an embedded Browser WebContents.
  * Programmatic sendInputEvent is not blocked by the interaction-lock overlay
@@ -37,6 +73,7 @@ export class OrcBrowserHost {
   private captures = new Map<string, Buffer>();
   private captureGate: Promise<void> = Promise.resolve();
   zoom = 1;
+  deviceScaleFactor = 1;
 
   constructor(
     readonly webContents: WebContents,
@@ -47,6 +84,17 @@ export class OrcBrowserHost {
       this.zoom = webContents.getZoomFactor();
     } catch {
       this.zoom = 1;
+    }
+  }
+
+  getSanitizedUrl(): string {
+    try {
+      const raw = this.webContents.getURL();
+      if (!raw) return "";
+      const u = new URL(raw);
+      return `${u.origin}${u.pathname}`;
+    } catch {
+      return "";
     }
   }
 
@@ -111,21 +159,27 @@ export class OrcBrowserHost {
       if (timer) clearTimeout(timer);
     }
     if (!raw.length) throw new Error("Browser trả về ảnh rỗng.");
-    const metadata = await sharp(raw).metadata();
+    let dpr = 1;
+    try {
+      const val = await wc.executeJavaScript("window.devicePixelRatio || 1", true);
+      if (typeof val === "number" && Number.isFinite(val) && val > 0) dpr = val;
+    } catch {
+      dpr = 1;
+    }
+    this.deviceScaleFactor = dpr;
+    const normalized = await normalizeCaptureBufferToDip(raw, this.bounds, dpr);
     const id = randomUUID();
-    this.captures.set(id, raw);
+    this.captures.set(id, normalized.buffer);
     if (this.captures.size > 70) this.captures.delete(this.captures.keys().next().value!);
-    const width = metadata.width ?? this.bounds.width;
-    const height = metadata.height ?? this.bounds.height;
     return {
       id,
-      width,
-      height,
+      width: normalized.width,
+      height: normalized.height,
       zoom,
       url: wc.getURL(),
       timestamp: new Date().toISOString(),
       backend: "cdp-surface",
-      dataUrl: options?.light ? "" : `data:image/png;base64,${raw.toString("base64")}`,
+      dataUrl: options?.light ? "" : `data:image/png;base64,${normalized.buffer.toString("base64")}`,
       bounds: { ...this.bounds },
     };
   }
