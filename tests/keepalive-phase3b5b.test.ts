@@ -747,3 +747,116 @@ test("empty / no-op ACK not sent", async () => {
     node.destroy();
   });
 });
+
+test("parseEventsAckResponse supports Laravel acked_through_sequence + camelCase + rejects missing/errors", () => {
+  // Actual Laravel ACK response shape
+  const laravel = parseEventsAckResponse(
+    {
+      ok: true,
+      protocol_version: KEEPALIVE_PROTOCOL_VERSION,
+      schema_version: KEEPALIVE_SCHEMA_VERSION,
+      node_id: "ka-node-mwosxyzh-dczwdgee",
+      tenant_id: "ins_4Zn6M7cHZIQI2UbS",
+      campaign_id: "cf0d8be1-5475-4c84-a788-600a6a8ae17f",
+      acked_through_sequence: 10,
+      acked_event_count_total: 10,
+    },
+    "ka-node-mwosxyzh-dczwdgee",
+    "cf0d8be1-5475-4c84-a788-600a6a8ae17f"
+  );
+  assert.equal(laravel.ok, true);
+  if (laravel.ok) {
+    assert.equal(laravel.data.lastContiguousSequence, 10);
+    assert.deepEqual(laravel.data.ackedEventIds, []);
+  }
+
+  // camelCase alias
+  const camel = parseEventsAckResponse(
+    envelope({ node_id: "n1", campaign_id: "c1", ackedThroughSequence: 5, already_acked: true }),
+    "n1",
+    "c1"
+  );
+  assert.equal(camel.ok, true);
+  if (camel.ok) {
+    assert.equal(camel.data.lastContiguousSequence, 5);
+    assert.equal(camel.data.idempotent, true);
+  }
+
+  // Missing confirmed sequence rejection
+  const missing = parseEventsAckResponse(
+    envelope({ node_id: "n1", campaign_id: "c1" }),
+    "n1",
+    "c1"
+  );
+  assert.equal(missing.ok, false);
+  if (!missing.ok) assert.equal(missing.code, "ack_sequence_missing");
+
+  // Server error responses
+  const nonContig = parseEventsAckResponse(
+    envelope({ node_id: "n1", campaign_id: "c1", ok: false, code: "ack_non_contiguous" }),
+    "n1",
+    "c1"
+  );
+  assert.equal(nonContig.ok, false);
+  if (!nonContig.ok) assert.equal(nonContig.code, "ack_non_contiguous");
+
+  const mismatch = parseEventsAckResponse(
+    envelope({ node_id: "other", campaign_id: "c1", acked_through_sequence: 1 }),
+    "n1",
+    "c1"
+  );
+  assert.equal(mismatch.ok, false);
+  if (!mismatch.ok) assert.equal(mismatch.code, "node_id_mismatch");
+});
+
+test("partial ACK confirmation and idempotent ACK retry with acked_through_sequence", async () => {
+  await withTempDir(async (dir) => {
+    let ackCall = 0;
+    const conn = createMockConnection(
+      standardSyncHandler({
+        eventsByCampaign: {
+          c1: [
+            eventRow(1, "job_reserved"),
+            eventRow(2, "job_started"),
+            eventRow(3, "job_completed"),
+          ],
+        },
+        onAck: () => {
+          ackCall += 1;
+          if (ackCall === 1) {
+            // Partial confirmation: only sequences 1..2 confirmed
+            return envelope({
+              node_id: "n1",
+              tenant_id: "install-1",
+              campaign_id: "c1",
+              acked_through_sequence: 2,
+              acked_event_count_total: 2,
+            });
+          }
+          // Idempotent cumulative retry confirming through 3
+          return envelope({
+            node_id: "n1",
+            tenant_id: "install-1",
+            campaign_id: "c1",
+            acked_through_sequence: 3,
+            acked_event_count_total: 3,
+            idempotent: true,
+          });
+        },
+      })
+    );
+
+    const { node, sync } = await bootNode(dir, "n1", conn);
+    await sync.refreshAssignments("test");
+    assert.equal(node.sqlite.getCursor("install-1", "c1")?.lastServerAckSequence, 2);
+    assert.equal(node.sqlite.getJournalEvent("e-1")?.syncStatus, "server_acked");
+    assert.equal(node.sqlite.getJournalEvent("e-2")?.syncStatus, "server_acked");
+    assert.equal(node.sqlite.getJournalEvent("e-3")?.syncStatus, "pending");
+
+    // Second sync retries remaining pending event #3 -> idempotent ACK advances to 3
+    await sync.refreshAssignments("retry");
+    assert.equal(node.sqlite.getCursor("install-1", "c1")?.lastServerAckSequence, 3);
+    assert.equal(node.sqlite.getJournalEvent("e-3")?.syncStatus, "server_acked");
+    node.destroy();
+  });
+});

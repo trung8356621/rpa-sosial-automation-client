@@ -808,6 +808,8 @@ export function parseEventsAckResponse(
   const lastContiguousSequence =
     num(raw.last_contiguous_sequence) ??
     num(raw.lastContiguousSequence) ??
+    num(raw.acked_through_sequence) ??
+    num(raw.ackedThroughSequence) ??
     num(raw.confirmed_sequence) ??
     num(raw.acked_sequence);
   const proto = checkProtocol(protocolVersion, schemaVersion);
