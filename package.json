@@ -8,7 +8,8 @@
     "build": "tsc -p tsconfig.main.json && vite build",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.main.json --noEmit",
     "start": "npm run build && electron .",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "multi": "node scripts/multi-instance.mjs"
   },
   "dependencies": {
     "@tesseract.js-data/eng": "^1.0.0",

@@ -33,6 +33,12 @@ import { APP_USER_MODEL_ID } from "../shared/windows-notification.js";
 import { sharedBrowserVirtualClipboard } from "./browser/browser-virtual-clipboard.js";
 import { resolveAccountLoginIdentifier } from "./browser/account-credential-actions.js";
 import { formatClientHttpError } from "../shared/seo-ops-http.js";
+import {
+  acquireInstanceLock,
+  parseDevInstanceId,
+  resolveDevUserDataPath,
+  type InstanceLockHandle,
+} from "./dev-instance.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const project = path.resolve(root, "..");
@@ -47,17 +53,33 @@ if (process.platform === "win32") {
   app.setAppUserModelId(APP_USER_MODEL_ID);
 }
 
-// Windows userData is strictly isolated to .local/client (never .local/creator)
-const userDataPath = app.isPackaged ? app.getPath("userData") : path.join(project, ".local", "client");
+// Windows userData is strictly isolated to .local/client (or .local/instances/<id> in dev multi-instance mode)
+const devInstanceId = app.isPackaged ? null : parseDevInstanceId(process.argv, process.env);
+const userDataPath = app.isPackaged
+  ? app.getPath("userData")
+  : resolveDevUserDataPath(project, devInstanceId);
 app.setPath("userData", userDataPath);
 app.setPath("sessionData", path.join(userDataPath, "chromium"));
 
-// Single-instance lock
-const gotTheLock = app.requestSingleInstanceLock();
-if (!gotTheLock && !isSmokeTest && !isCaptureM3 && !isCaptureM4) {
-  console.log("Another instance of RPA Client is already running. Exiting.");
-  app.quit();
-  process.exit(0);
+let devInstanceLock: InstanceLockHandle | null = null;
+if (devInstanceId) {
+  try {
+    devInstanceLock = acquireInstanceLock(userDataPath);
+    app.on("will-quit", () => devInstanceLock?.release());
+    process.on("exit", () => devInstanceLock?.release());
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    app.quit();
+    process.exit(1);
+  }
+} else {
+  // Single-instance lock (production & default single-instance dev)
+  const gotTheLock = app.requestSingleInstanceLock();
+  if (!gotTheLock && !isSmokeTest && !isCaptureM3 && !isCaptureM4) {
+    console.log("Another instance of RPA Client is already running. Exiting.");
+    app.quit();
+    process.exit(0);
+  }
 }
 
 initializeMainLogging(userDataPath);
@@ -254,7 +276,11 @@ app.on("window-all-closed", () => {
 });
 
 async function bootstrap() {
-  logClientEvent("RPA Client starting", { version: "0.1.0", userDataPath });
+  logClientEvent("RPA Client starting", {
+    version: "0.1.0",
+    userDataPath,
+    ...(devInstanceId ? { instanceId: devInstanceId } : {}),
+  });
 
   await store.load();
   await credentials.hydrate();
