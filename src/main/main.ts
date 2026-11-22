@@ -64,10 +64,14 @@ app.setPath("userData", userDataPath);
 app.setPath("sessionData", path.join(userDataPath, "chromium"));
 
 let devInstanceLock: InstanceLockHandle | null = null;
+let devClaimEnabled: boolean | undefined;
 if (devInstanceId) {
   const devCfg = readDevInstanceConfig(userDataPath);
   if (process.env.RPA_KEEPALIVE_SOCKET_ENABLE === undefined && typeof devCfg?.socketEnabled === "boolean") {
     process.env.RPA_KEEPALIVE_SOCKET_ENABLE = devCfg.socketEnabled ? "1" : "0";
+  }
+  if (typeof devCfg?.claimEnabled === "boolean") {
+    devClaimEnabled = devCfg.claimEnabled;
   }
   try {
     devInstanceLock = acquireInstanceLock(userDataPath);
@@ -369,9 +373,12 @@ async function bootstrap() {
       scriptLoader
     );
     // Contract gate can be OPEN while runtime claim stays opt-in — avoids accidental
-    // production claim during Desktop integration without RPA_CAMPAIGN_CLAIM=1.
+    // production claim during Desktop integration without RPA_CAMPAIGN_CLAIM=1 or instance.json claimEnabled.
+    const claimEnv = process.env.RPA_CAMPAIGN_CLAIM;
     const claimRuntime =
-      process.env.RPA_CAMPAIGN_CLAIM === "1" || process.env.RPA_CAMPAIGN_CLAIM === "true";
+      claimEnv !== undefined
+        ? claimEnv === "1" || claimEnv === "true"
+        : Boolean(devClaimEnabled);
     campaignJobWorker.setEnabled(claimRuntime);
     const ready = campaignJobWorker.readiness();
     logClientEvent("CAMPAIGN_JOB_WORKER_WIRED", {

@@ -124,7 +124,7 @@ $sc.TargetPath = '${exe.replace(/'/g, "''")}'
 $sc.Arguments = '${args.replace(/'/g, "''")}'
 $sc.WorkingDirectory = '${projectRoot.replace(/'/g, "''")}'
 ${iconLine}
-$sc.Description = 'RPA Execution Client V2 (${id}) - Dev Multi-Instance (Claim OFF)'
+$sc.Description = 'RPA Execution Client V2 (${id}) - Dev Multi-Instance'
 $sc.Save()
 `.trim();
   execFileSync("powershell.exe", ["-NoProfile", "-Command", psScript], { stdio: "pipe" });
@@ -146,6 +146,7 @@ function getInstanceState(id) {
     pid,
     userDataPath: dir,
     socketEnabled: cfg?.socketEnabled ?? runner?.socketEnabled ?? false,
+    claimEnabled: cfg?.claimEnabled ?? runner?.claimEnabled ?? false,
     nodeId: settings?.keepAliveNodeId ?? null,
     sqliteExists: existsSync(sqlitePath),
     shortcutExists: existsSync(lnk),
@@ -158,19 +159,26 @@ function parseFlag(args, prefix) {
   return hit ? hit.slice(prefix.length) : null;
 }
 
+function parseBoolFlag(args, prefix) {
+  const val = parseFlag(args, prefix);
+  return val != null ? val === "1" || val === "true" : null;
+}
+
 function hasFlag(args, flag) {
   return args.includes(flag);
 }
 
-function ensureInstanceManifest(id, socketOverride = null) {
+function ensureInstanceManifest(id, socketOverride = null, claimOverride = null) {
   const dir = instanceDir(id);
   mkdirSync(path.join(dir, "logs"), { recursive: true });
   const cfgFile = configPath(id);
   const existing = readJsonSafe(cfgFile);
   if (existing) {
-    // Idempotent: preserve existing profile data; only update socketEnabled if explicitly passed
-    if (socketOverride !== null && existing.socketEnabled !== socketOverride) {
-      const updated = { ...existing, socketEnabled: socketOverride, claimEnabled: false };
+    // Idempotent: preserve existing profile data; only update flags if explicitly passed
+    const nextSocket = socketOverride !== null ? socketOverride : Boolean(existing.socketEnabled);
+    const nextClaim = claimOverride !== null ? claimOverride : Boolean(existing.claimEnabled);
+    if (existing.socketEnabled !== nextSocket || existing.claimEnabled !== nextClaim) {
+      const updated = { ...existing, socketEnabled: nextSocket, claimEnabled: nextClaim };
       writeFileSync(cfgFile, JSON.stringify(updated, null, 2) + "\n", "utf8");
       return { created: false, config: updated };
     }
@@ -179,7 +187,7 @@ function ensureInstanceManifest(id, socketOverride = null) {
   const createdCfg = {
     instanceId: id,
     socketEnabled: socketOverride ?? false,
-    claimEnabled: false,
+    claimEnabled: claimOverride ?? false,
     createdAt: new Date().toISOString(),
   };
   writeFileSync(cfgFile, JSON.stringify(createdCfg, null, 2) + "\n", "utf8");
@@ -188,17 +196,16 @@ function ensureInstanceManifest(id, socketOverride = null) {
 
 function cmdCreate(id, args) {
   assertValidInstance(id);
-  const socketFlag = parseFlag(args, "--socket=");
-  const socketOverride =
-    socketFlag != null ? socketFlag === "1" || socketFlag === "true" : null;
-  const { created, config } = ensureInstanceManifest(id, socketOverride);
+  const socketOverride = parseBoolFlag(args, "--socket=");
+  const claimOverride = parseBoolFlag(args, "--claim=");
+  const { created, config } = ensureInstanceManifest(id, socketOverride, claimOverride);
 
   let lnkPath = null;
   if (hasFlag(args, "--shortcut")) {
     lnkPath = createWindowsShortcut(id);
   }
   console.log(
-    `${created ? "Created" : "Preserved"} ${id} | userData=${instanceDir(id)} | socket=${config.socketEnabled ? "1" : "0"} | claim=OFF${lnkPath ? ` | shortcut=${lnkPath}` : ""}`
+    `${created ? "Created" : "Preserved"} ${id} | userData=${instanceDir(id)} | socket=${config.socketEnabled ? "1" : "0"} | claim=${config.claimEnabled ? "ON" : "OFF"}${lnkPath ? ` | shortcut=${lnkPath}` : ""}`
   );
 }
 
@@ -210,11 +217,11 @@ async function cmdStart(id, args) {
     process.exit(1);
   }
 
-  const socketFlag = parseFlag(args, "--socket=");
-  const socketOverride =
-    socketFlag != null ? socketFlag === "1" || socketFlag === "true" : null;
-  const { config } = ensureInstanceManifest(id, socketOverride);
+  const socketOverride = parseBoolFlag(args, "--socket=");
+  const claimOverride = parseBoolFlag(args, "--claim=");
+  const { config } = ensureInstanceManifest(id, socketOverride, claimOverride);
   const socketEnabled = Boolean(config.socketEnabled);
+  const claimEnabled = Boolean(config.claimEnabled);
 
   const dir = instanceDir(id);
   const consoleLog = path.join(dir, "logs", "console.log");
@@ -228,7 +235,7 @@ async function cmdStart(id, args) {
     env: {
       ...process.env,
       RPA_DEV_INSTANCE: id,
-      RPA_CAMPAIGN_CLAIM: "OFF",
+      RPA_CAMPAIGN_CLAIM: claimEnabled ? "1" : "0",
       RPA_KEEPALIVE_SOCKET_ENABLE: socketEnabled ? "1" : "0",
     },
   });
@@ -242,7 +249,7 @@ async function cmdStart(id, args) {
         instanceId: id,
         pid: child.pid,
         socketEnabled,
-        claimEnabled: false,
+        claimEnabled,
         startedAt: new Date().toISOString(),
       },
       null,
@@ -257,7 +264,7 @@ async function cmdStart(id, args) {
     process.exit(1);
   }
   console.log(
-    `Started ${id} (PID ${child.pid}) | userData=${dir} | socket=${socketEnabled ? "1" : "0"} | claim=OFF`
+    `Started ${id} (PID ${child.pid}) | userData=${dir} | socket=${socketEnabled ? "1" : "0"} | claim=${claimEnabled ? "ON" : "OFF"}`
   );
 }
 
@@ -344,7 +351,7 @@ function cmdList() {
   for (const id of discoverInstances()) {
     const s = getInstanceState(id);
     console.log(
-      `${s.instanceId}: ${s.running ? `RUNNING (pid=${s.pid})` : "STOPPED"} | socket=${s.socketEnabled ? "1" : "0"} | nodeId=${s.nodeId ?? "-"} | sqlite=${s.sqliteExists ? "yes" : "no"} | shortcut=${s.shortcutExists ? "yes" : "no"} | userData=${s.userDataPath}`
+      `${s.instanceId}: ${s.running ? `RUNNING (pid=${s.pid})` : "STOPPED"} | socket=${s.socketEnabled ? "1" : "0"} | claim=${s.claimEnabled ? "1" : "0"} | nodeId=${s.nodeId ?? "-"} | sqlite=${s.sqliteExists ? "yes" : "no"} | shortcut=${s.shortcutExists ? "yes" : "no"} | userData=${s.userDataPath}`
     );
   }
 }
@@ -352,11 +359,11 @@ function cmdList() {
 function printHelp() {
   console.log(`Usage: node scripts/multi-instance.mjs <command> [instance] [options]
 Commands:
-  create <client-X> [--socket=0|1] [--shortcut]
-  start <client-X> [--socket=0|1]
+  create <client-X> [--socket=0|1] [--claim=0|1] [--shortcut]
+  start <client-X> [--socket=0|1] [--claim=0|1]
   stop <client-X|all>
   offline <client-X>
-  restart <client-X> [--socket=0|1]
+  restart <client-X> [--socket=0|1] [--claim=0|1]
   logs <client-X> [--lines=50]
   delete <client-X> --confirm
   list`);
