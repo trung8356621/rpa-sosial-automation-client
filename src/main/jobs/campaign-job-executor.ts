@@ -8,6 +8,7 @@ import { logClientError, logClientEvent } from "../main-error-log.js";
 import { CampaignJobApi } from "./campaign-job-api.js";
 import { CampaignScriptLoader } from "./campaign-script-loader.js";
 import {
+  doesSiteKeyMatchSiteUrl,
   resolveClaimScriptPin,
   type CampaignJobClaim,
   type CampaignJobResultStatus,
@@ -19,6 +20,7 @@ import { verifyWordPressDraft } from "./wordpress-draft-verify.js";
 export type CampaignJobBrowserHost = {
   open(browserId: string): Promise<void>;
   getWebContents(): WebContents | undefined;
+  getAuthState?: () => { code: string; checkpointStatus?: string; message: string } | null;
   getBounds(): Rect;
   applyViewport(size: { width: number; height: number }): void | Promise<void>;
   restoreViewport(): void | Promise<void>;
@@ -45,6 +47,25 @@ export type CampaignJobExecuteOutcome = {
 
 const DEFAULT_JOB_TIMEOUT_MS = 180_000;
 const PROGRESS_INTERVAL_MS = 20_000;
+
+const BLOCKING_AUTH_FAILURE_CODES = new Set([
+  "AUTH_EXECUTION_FAILED",
+  "AUTH_TIMEOUT",
+  "AUTH_INTEGRITY_FAILED",
+  "AUTH_DOWNLOAD_FAILED",
+  "ORC_RUNTIME_UNAVAILABLE",
+  "ASSET_DOWNLOAD_UNAVAILABLE",
+  "ASSET_INTEGRITY_FAILED",
+  "VIEWPORT_MISMATCH",
+  "NO_ACCOUNT_TAG_ENTITLEMENT",
+  "CLIENT_LEASE_INVALID",
+  "AUTH_CONTEXT_AMBIGUOUS",
+  "AUTH_CONTEXT_UNAVAILABLE",
+  "AUTH_CANCELLED",
+  "CHECKPOINT_FAILED",
+  "SESSION_UNKNOWN",
+  "NO_TAG_CONTEXT",
+]);
 
 export class CampaignJobExecutor {
   private activeAbort: AbortController | null = null;
@@ -167,7 +188,38 @@ export class CampaignJobExecutor {
         );
       }
 
+      const authState = this.host.getAuthState?.();
+      if (authState) {
+        if (authState.code === "HUMAN_REQUIRED") {
+          return await this.reportTerminal(
+            claim,
+            "unknown",
+            "HUMAN_REQUIRED",
+            authState.message || "Auth yêu cầu xác minh thủ công.",
+            { stepsExecuted: 0 }
+          );
+        }
+        if (BLOCKING_AUTH_FAILURE_CODES.has(authState.code)) {
+          return await this.reportTerminal(
+            claim,
+            "failed",
+            authState.code,
+            authState.message || `Auth/Session chưa sẵn sàng (${authState.code}).`,
+            { stepsExecuted: 0 }
+          );
+        }
+      }
+
       const account = await this.host.loadAccount(profile.accountId);
+      if (claim.site_key && account.siteUrl && !doesSiteKeyMatchSiteUrl(claim.site_key, account.siteUrl)) {
+        return await this.reportTerminal(
+          claim,
+          "failed",
+          "SITE_MISMATCH",
+          `Site mismatch: claim site_key=${claim.site_key} ≠ account siteUrl=${account.siteUrl}`,
+          { stepsExecuted: 0 }
+        );
+      }
       const variables = Array.isArray(pull.release.manifest.variables)
         ? (pull.release.manifest.variables as AuthScriptVariable[])
         : [];

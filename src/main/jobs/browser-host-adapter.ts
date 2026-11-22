@@ -2,7 +2,7 @@ import type { EmbeddedBrowser } from "../browser/embedded-browser.js";
 import type { ProfileManager } from "../browser/profile-manager.js";
 import type { BrowserSyncService } from "../browser/browser-sync-service.js";
 import type { CampaignJobBrowserHost } from "./campaign-job-executor.js";
-import type { CampaignJobClaim } from "./contracts.js";
+import { doesSiteKeyMatchSiteUrl, type CampaignJobClaim } from "./contracts.js";
 
 /**
  * Adapt EmbeddedBrowser + ProfileManager for Campaign Job execution
@@ -22,6 +22,15 @@ export function createCampaignJobBrowserHost(params: {
     },
     getWebContents() {
       return embeddedBrowser.getWebContents();
+    },
+    getAuthState() {
+      const auth = embeddedBrowser.getLastAuthResult();
+      if (!auth) return null;
+      return {
+        code: auth.code,
+        checkpointStatus: auth.checkpointStatus,
+        message: auth.message,
+      };
     },
     getBounds() {
       const b = embeddedBrowser.getBounds();
@@ -59,6 +68,16 @@ export function createCampaignJobBrowserHost(params: {
             message: `browser_id ${claim.browser_id} không có Account binding.`,
           };
         }
+        if (
+          claim.site_key &&
+          byBrowser.accountBinding?.siteUrl &&
+          !doesSiteKeyMatchSiteUrl(claim.site_key, byBrowser.accountBinding.siteUrl)
+        ) {
+          return {
+            ok: false as const,
+            message: `Site mismatch: claim site_key=${claim.site_key} ≠ profile siteUrl=${byBrowser.accountBinding.siteUrl}`,
+          };
+        }
         return {
           ok: true as const,
           browserId: byBrowser.browserId,
@@ -79,6 +98,16 @@ export function createCampaignJobBrowserHost(params: {
         return {
           ok: false as const,
           message: `Account ${claim.account_id} local browser ${byAccount.browserId} ≠ claim browser_id ${claim.browser_id}`,
+        };
+      }
+      if (
+        claim.site_key &&
+        byAccount.accountBinding?.siteUrl &&
+        !doesSiteKeyMatchSiteUrl(claim.site_key, byAccount.accountBinding.siteUrl)
+      ) {
+        return {
+          ok: false as const,
+          message: `Site mismatch: claim site_key=${claim.site_key} ≠ profile siteUrl=${byAccount.accountBinding.siteUrl}`,
         };
       }
       return {

@@ -20,6 +20,10 @@ export type CampaignJobResultStatus = "succeeded" | "failed" | "cancelled" | "un
  * - execution_digest: execution payload identity (never swap with content_digest)
  */
 export type CampaignJobClaim = {
+  plan_version?: number;
+  plan_tag_id?: number;
+  action_tag_key?: string;
+  site_key?: string;
   job_id: string;
   attempt_id: string;
   campaign_id: string;
@@ -29,6 +33,9 @@ export type CampaignJobClaim = {
   /** Package key (Addon: campaign.script_id → job.package_key). */
   script_id: string;
   script_version: string;
+  package_key?: string;
+  package_id?: number;
+  version?: string;
   run_mode: CampaignRunMode;
   execution_mode: CampaignExecutionMode;
   input: Record<string, unknown>;
@@ -94,8 +101,19 @@ export function parseCampaignJobClaim(raw: unknown): CampaignJobClaim | null {
   const attempt_id = str(r.attempt_id);
   const browser_id = str(r.browser_id);
   const account_id = str(r.account_id);
-  const script_id = str(r.script_id) || str(r.package_key);
-  const script_version = str(r.script_version) || str(r.version) || str(r.package_version);
+  const rawScriptId = str(r.script_id);
+  const rawPackageKey = str(r.package_key);
+  if (rawScriptId && rawPackageKey && rawScriptId !== rawPackageKey) {
+    return null;
+  }
+  const script_id = rawScriptId || rawPackageKey;
+
+  const rawScriptVersion = str(r.script_version);
+  const rawVersion = str(r.version);
+  if (rawScriptVersion && rawVersion && rawScriptVersion !== rawVersion) {
+    return null;
+  }
+  const script_version = rawScriptVersion || rawVersion || str(r.package_version);
   const lease_token = str(r.lease_token);
   if (!job_id || !attempt_id || !browser_id || !account_id || !script_id || !script_version || !lease_token) {
     return null;
@@ -107,8 +125,11 @@ export function parseCampaignJobClaim(raw: unknown): CampaignJobClaim | null {
     r.input && typeof r.input === "object" && !Array.isArray(r.input)
       ? (r.input as Record<string, unknown>)
       : {};
-  const releaseId = Number(r.release_id);
   return {
+    plan_version: posInt(r.plan_version),
+    plan_tag_id: posInt(r.plan_tag_id),
+    action_tag_key: str(r.action_tag_key) || undefined,
+    site_key: str(r.site_key) || undefined,
     job_id,
     attempt_id,
     campaign_id: str(r.campaign_id) || "",
@@ -117,12 +138,15 @@ export function parseCampaignJobClaim(raw: unknown): CampaignJobClaim | null {
     account_id,
     script_id,
     script_version,
+    package_key: rawPackageKey || undefined,
+    package_id: posInt(r.package_id),
+    version: rawVersion || undefined,
     run_mode,
     execution_mode,
     input,
     lease_token,
     lease_expires_at: str(r.lease_expires_at) || "",
-    release_id: Number.isFinite(releaseId) && releaseId > 0 ? releaseId : undefined,
+    release_id: posInt(r.release_id),
     content_digest: digestHex(r.content_digest) || undefined,
     execution_digest: digestHex(r.execution_digest) || undefined,
   };
@@ -173,6 +197,40 @@ export function claimPinGap(): CampaignScriptContractGap {
 /** @deprecated Use resolveClaimScriptPin — content_digest only is insufficient. */
 export function resolveClaimDigest(claim: CampaignJobClaim): string | null {
   return digestHex(claim.content_digest);
+}
+
+function posInt(v: unknown): number | undefined {
+  if (v === null || v === undefined || v === "") return undefined;
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * Verify claim.site_key against an Account/Profile siteUrl without weakening domain checks.
+ * Accepts domain keys (e.g. "maytuicanvas.com") or URL keys ("https://maytuicanvas.com/").
+ */
+export function doesSiteKeyMatchSiteUrl(siteKey: string, siteUrl?: string | null): boolean {
+  const rawKey = siteKey.trim().toLowerCase();
+  const rawUrl = (siteUrl ?? "").trim().toLowerCase();
+  if (!rawKey || !rawUrl) return true;
+
+  const hostFrom = (val: string): string => {
+    try {
+      const withScheme = /^https?:\/\//.test(val) ? val : `https://${val}`;
+      return new URL(withScheme).hostname.toLowerCase().replace(/^www\./, "");
+    } catch {
+      return val.replace(/^www\./, "");
+    }
+  };
+
+  const keyHost = hostFrom(rawKey);
+  const urlHost = hostFrom(rawUrl);
+  if (!keyHost || !urlHost) return true;
+
+  if (keyHost.includes(".")) {
+    return keyHost === urlHost;
+  }
+  return urlHost === keyHost || urlHost.startsWith(`${keyHost}.`);
 }
 
 function str(v: unknown): string {
