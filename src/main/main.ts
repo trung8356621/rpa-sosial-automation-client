@@ -24,6 +24,7 @@ import { BrowserOpenOrchestrator } from "./auth/browser-open-orchestrator.js";
 import { AuthContextFinder } from "./auth/auth-context-finder.js";
 import { CampaignJobApi } from "./jobs/campaign-job-api.js";
 import { CampaignJobExecutor } from "./jobs/campaign-job-executor.js";
+import { JobAttemptIdempotencyStore } from "./jobs/idempotency.js";
 import { CampaignJobWorker } from "./jobs/campaign-job-worker.js";
 import { CampaignScriptLoader } from "./jobs/campaign-script-loader.js";
 import { createCampaignJobBrowserHost } from "./jobs/browser-host-adapter.js";
@@ -365,7 +366,16 @@ async function bootstrap() {
       syncService,
       artifactsDir: path.join(userDataPath, "artifacts", "campaign-jobs"),
     });
-    const jobExecutor = new CampaignJobExecutor(jobApi, scriptLoader, jobHost, new AuthScriptRunner());
+    const attemptStore = new JobAttemptIdempotencyStore(
+      path.join(userDataPath, "campaign-job-attempts.json")
+    );
+    const jobExecutor = new CampaignJobExecutor(
+      jobApi,
+      scriptLoader,
+      jobHost,
+      new AuthScriptRunner(),
+      attemptStore
+    );
     campaignJobWorker = new CampaignJobWorker(
       connection,
       profileManager,

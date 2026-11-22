@@ -114,6 +114,7 @@ export class CampaignJobWorker {
 
     this.inFlight = true;
     try {
+      await this.executor.flushPendingResults?.();
       const claimed = await this.api.claim({ agentUuid, browserIds });
       if (!claimed.ok) {
         logClientError("CAMPAIGN_JOB_CLAIM_FAILED", {

@@ -13,6 +13,7 @@ import {
   doesSiteKeyMatchSiteUrl,
   resolveClaimScriptPin,
   type CampaignJobClaim,
+  type CampaignJobResultRequest,
   type CampaignJobResultStatus,
 } from "./contracts.js";
 import type { FailureScreenshotArtifact } from "./failure-screenshot.js";
@@ -101,17 +102,34 @@ export class CampaignJobExecutor {
   async execute(claim: CampaignJobClaim, opts?: { timeoutMs?: number }): Promise<CampaignJobExecuteOutcome> {
     if (this.idempotency.hasTerminal(claim.job_id, claim.attempt_id)) {
       const prev = this.idempotency.get(claim.job_id, claim.attempt_id);
+      let reported = false;
+      if (
+        prev?.state === "terminal_pending_delivery" &&
+        !prev.deliveryStopped &&
+        prev.pendingPayload &&
+        (!prev.nextRetryAt || Date.now() >= prev.nextRetryAt)
+      ) {
+        const delivery = await this.deliverPendingResult(
+          claim.job_id,
+          claim.attempt_id,
+          claim.lease_token
+        );
+        reported = delivery.ok;
+      }
       logClientEvent("CAMPAIGN_JOB_IDEMPOTENT_SKIP", {
         jobId: claim.job_id,
         attemptId: claim.attempt_id,
-        previous: prev?.status,
+        previousState: prev?.state ?? null,
+        previousStatus: prev?.status ?? null,
+        redeliveryAttempted: prev?.state === "terminal_pending_delivery",
+        reported,
       });
       return {
-        reported: false,
+        reported,
         status: (prev?.status as CampaignJobResultStatus) || "unknown",
         code: "IDEMPOTENT_SKIP",
-        message: "Same job attempt already terminal — không thực thi lại.",
-        stepsExecuted: 0,
+        message: "Same job attempt already executed — không thực thi lại.",
+        stepsExecuted: Number(prev?.pendingPayload?.output?.steps_executed ?? 0) || 0,
         idempotentSkip: true,
       };
     }
@@ -177,6 +195,8 @@ export class CampaignJobExecutor {
         stepsExecuted: 0,
       };
     }
+
+    this.idempotency.markExecuting(claim.job_id, claim.attempt_id);
 
     const abort = new AbortController();
     this.activeAbort = abort;
@@ -483,7 +503,7 @@ export class CampaignJobExecutor {
       }
     }
 
-    const body = {
+    const body: CampaignJobResultRequest = {
       attempt_id: claim.attempt_id,
       lease_token: claim.lease_token,
       status,
@@ -513,40 +533,151 @@ export class CampaignJobExecutor {
           }
         : {}),
     };
-    const res = await this.api.result(claim.job_id, body);
-    if (res.ok) {
-      this.idempotency.markTerminal(claim.job_id, claim.attempt_id, status);
-    } else {
-      logClientError("CAMPAIGN_JOB_RESULT_REPORT_FAILED", {
-        jobId: claim.job_id,
-        attemptId: claim.attempt_id,
-        status,
-        screenshotCaptureStatus: screenshotArtifact?.status ?? null,
-        screenshotUploadStatus: screenshotArtifact ? "failed" : null,
-        errors: res.errors,
-        message: res.message,
-      });
-    }
+
+    // Persist terminal outcome and original payload BEFORE attempting network delivery.
+    this.idempotency.markTerminalPending(claim.job_id, claim.attempt_id, {
+      status,
+      code,
+      message,
+      payload: body,
+      localScreenshotArtifact: screenshotArtifact,
+    });
+
+    const delivery = await this.deliverPendingResult(claim.job_id, claim.attempt_id);
     logClientEvent("CAMPAIGN_JOB_TERMINAL", {
       jobId: claim.job_id,
       attemptId: claim.attempt_id,
       status,
       code,
-      reported: res.ok,
-      idempotent: res.ok ? res.idempotent : false,
+      reported: delivery.ok,
+      idempotent: delivery.idempotent,
+      usedFallbackWithoutArtifacts: delivery.usedFallback,
       stepsExecuted: extra.stepsExecuted,
       draftVerified: extra.draftVerified ?? false,
       screenshotCaptureStatus: screenshotArtifact?.status ?? null,
-      screenshotUploadStatus: screenshotArtifact ? (res.ok ? "metadata_reported" : "failed") : null,
+      screenshotUploadStatus: screenshotArtifact
+        ? delivery.ok
+          ? delivery.usedFallback
+            ? "retained_local_only"
+            : "metadata_reported"
+          : "failed"
+        : null,
     });
     return {
-      reported: res.ok,
+      reported: delivery.ok,
       status,
       code,
       message,
       stepsExecuted: extra.stepsExecuted,
       draftVerified: extra.draftVerified,
     };
+  }
+
+  async flushPendingResults(): Promise<number> {
+    const pending = this.idempotency.listPendingDelivery();
+    let delivered = 0;
+    for (const rec of pending) {
+      const res = await this.deliverPendingResult(rec.jobId, rec.attemptId);
+      if (res.ok) delivered += 1;
+    }
+    return delivered;
+  }
+
+  private async deliverPendingResult(
+    jobId: string,
+    attemptId: string,
+    overrideLeaseToken?: string
+  ): Promise<{ ok: boolean; idempotent: boolean; usedFallback: boolean }> {
+    const rec = this.idempotency.get(jobId, attemptId);
+    if (!rec?.pendingPayload) {
+      return { ok: false, idempotent: false, usedFallback: false };
+    }
+    const payload: CampaignJobResultRequest = overrideLeaseToken
+      ? { ...rec.pendingPayload, lease_token: overrideLeaseToken }
+      : rec.pendingPayload;
+
+    const res = await this.api.result(jobId, payload);
+    if (res.ok) {
+      this.idempotency.markTerminalAcknowledged(jobId, attemptId, { lastDeliveryStatus: 200 });
+      return { ok: true, idempotent: Boolean(res.idempotent), usedFallback: false };
+    }
+
+    const isAuthOrFenceError =
+      res.status === 401 ||
+      res.status === 403 ||
+      res.errors.some((e) => /stale|fence|expired/i.test(e));
+
+    // Compatibility fallback: if Backend rejects artifacts[] validation, retry with original result without artifacts[].
+    let finalRes = res;
+    let payloadWithoutArtifacts: CampaignJobResultRequest | undefined;
+    if (!isAuthOrFenceError && (res.status === 422 || res.status === 400) && payload.artifacts?.length) {
+      logClientEvent("CAMPAIGN_JOB_RESULT_ARTIFACTS_REJECTED", {
+        jobId,
+        attemptId,
+        httpStatus: res.status,
+        errors: res.errors,
+        message: res.message,
+      });
+      const cleanOutput = payload.output ? { ...payload.output } : undefined;
+      if (cleanOutput && "screenshot_artifact" in cleanOutput) {
+        delete cleanOutput.screenshot_artifact;
+      }
+      payloadWithoutArtifacts = {
+        attempt_id: payload.attempt_id,
+        lease_token: payload.lease_token,
+        status: payload.status,
+        ...(cleanOutput ? { output: cleanOutput } : {}),
+        error: payload.error,
+      };
+      const fallbackRes = await this.api.result(jobId, payloadWithoutArtifacts);
+      if (fallbackRes.ok) {
+        this.idempotency.markTerminalAcknowledged(jobId, attemptId, { lastDeliveryStatus: 200 });
+        logClientEvent("CAMPAIGN_JOB_RESULT_DELIVERED_WITHOUT_ARTIFACTS", {
+          jobId,
+          attemptId,
+          status: payload.status,
+          code: rec.code,
+          localScreenshotPath: rec.localScreenshotArtifact?.local_path ?? null,
+        });
+        return { ok: true, idempotent: Boolean(fallbackRes.idempotent), usedFallback: true };
+      }
+      finalRes = fallbackRes;
+    }
+
+    const nextAttempts = rec.deliveryAttempts + 1;
+    const isPermanent =
+      isAuthOrFenceError ||
+      finalRes.status === 404 ||
+      finalRes.status === 409 ||
+      finalRes.status === 422 ||
+      finalRes.status === 400 ||
+      nextAttempts >= 10;
+
+    const backoffMs = Math.min(300_000, 15_000 * 2 ** Math.min(6, rec.deliveryAttempts));
+    this.idempotency.recordDeliveryFailure(jobId, attemptId, {
+      status: finalRes.status,
+      errors: finalRes.errors,
+      message: finalRes.message,
+      permanent: isPermanent,
+      nextRetryAt: isPermanent ? undefined : Date.now() + backoffMs,
+      payloadWithoutArtifacts,
+    });
+
+    logClientError("CAMPAIGN_JOB_RESULT_REPORT_FAILED", {
+      jobId,
+      attemptId,
+      status: rec.status,
+      code: rec.code,
+      httpStatus: finalRes.status,
+      errors: finalRes.errors,
+      message: finalRes.message,
+      permanent: isPermanent,
+      deliveryAttempts: nextAttempts,
+      screenshotCaptureStatus: rec.localScreenshotArtifact?.status ?? null,
+      screenshotUploadStatus: rec.localScreenshotArtifact ? "failed" : null,
+    });
+
+    return { ok: false, idempotent: false, usedFallback: false };
   }
 }
 

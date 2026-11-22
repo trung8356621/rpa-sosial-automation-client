@@ -274,6 +274,19 @@ export class VisualOrcExecutor {
 
       try {
         if (matchTo) {
+          if (matchTo === "top") {
+            const reset = await advanceOcrSearch(
+              this.host.webContents,
+              matchTo,
+              this.host.zoom,
+              true,
+              false
+            );
+            if (reset.moved) {
+              await sleep(120);
+              current = await this.host.capture({ light: true });
+            }
+          }
           const scope = await advanceOcrSearch(
             this.host.webContents,
             matchTo,

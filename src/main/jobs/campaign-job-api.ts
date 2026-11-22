@@ -91,7 +91,7 @@ export class CampaignJobApi {
           ok: false,
           status: 422,
           errors: asErrors(res),
-          message: fallback,
+          message: typeof res.message === "string" && res.message.trim() ? res.message : fallback,
         };
       }
       return {

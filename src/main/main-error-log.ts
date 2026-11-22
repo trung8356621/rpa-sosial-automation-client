@@ -48,15 +48,30 @@ export function logClientEvent(event: string, details?: unknown) {
   }
 }
 
+function formatErrorValue(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack || error.message;
+  }
+  if (error && typeof error === "object") {
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+  return String(error);
+}
+
 export function logClientError(event: string, error: unknown) {
   const time = new Date().toISOString();
-  const errMsg = error instanceof Error ? error.stack || error.message : String(error);
+  const errMsg = formatErrorValue(error);
   const text = `[${time}] [ERROR] ${event}: ${errMsg}`;
   const sanitized = sanitizeLog(text);
   console.error(sanitized);
 
   if (logListener) {
-    logListener({ time, level: "ERROR", message: sanitizeLog(`${event}: ${error instanceof Error ? error.message : String(error)}`) });
+    const shortMsg = error instanceof Error ? error.message : errMsg;
+    logListener({ time, level: "ERROR", message: sanitizeLog(`${event}: ${shortMsg}`) });
   }
 
   if (logFilePath) {
