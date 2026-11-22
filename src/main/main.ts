@@ -363,6 +363,7 @@ async function bootstrap() {
       embeddedBrowser,
       profileManager,
       syncService,
+      artifactsDir: path.join(userDataPath, "artifacts", "campaign-jobs"),
     });
     const jobExecutor = new CampaignJobExecutor(jobApi, scriptLoader, jobHost, new AuthScriptRunner());
     campaignJobWorker = new CampaignJobWorker(

@@ -1,7 +1,9 @@
+import path from "node:path";
 import type { EmbeddedBrowser } from "../browser/embedded-browser.js";
 import type { ProfileManager } from "../browser/profile-manager.js";
 import type { BrowserSyncService } from "../browser/browser-sync-service.js";
 import type { CampaignJobBrowserHost } from "./campaign-job-executor.js";
+import { captureAndPersistFailureScreenshot } from "./failure-screenshot.js";
 import { doesSiteKeyMatchSiteUrl, type CampaignJobClaim } from "./contracts.js";
 
 /**
@@ -12,10 +14,28 @@ export function createCampaignJobBrowserHost(params: {
   embeddedBrowser: EmbeddedBrowser;
   profileManager: ProfileManager;
   syncService: BrowserSyncService;
+  artifactsDir?: string;
 }): CampaignJobBrowserHost {
   const { embeddedBrowser, profileManager, syncService } = params;
+  const artifactsDir =
+    params.artifactsDir || path.join(process.cwd(), ".local", "artifacts", "campaign-jobs");
 
   return {
+    prepareForExecution(browserId: string) {
+      embeddedBrowser.prepareExecutionWindow(browserId);
+    },
+    async verifyExecutionViewport() {
+      return embeddedBrowser.verifyExecutionViewport();
+    },
+    async captureFailureScreenshot(shotParams) {
+      return captureAndPersistFailureScreenshot({
+        webContents: embeddedBrowser.getWebContents(),
+        jobId: shotParams.jobId,
+        attemptId: shotParams.attemptId,
+        errorCode: shotParams.code,
+        artifactsDir,
+      });
+    },
     async open(browserId: string) {
       // No Action Tag — job script is separate from Auth pipeline on open.
       await embeddedBrowser.open(browserId, undefined, null);

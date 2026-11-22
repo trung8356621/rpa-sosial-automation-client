@@ -19,6 +19,11 @@ contextBridge.exposeInMainWorld("client", {
     ipcRenderer.on("client:browser-state-change", handler);
     return () => ipcRenderer.removeListener("client:browser-state-change", handler);
   },
+  onFocusBrowserTab: (callback: (payload: { browserId?: string | null }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { browserId?: string | null }) => callback(payload);
+    ipcRenderer.on("client:focus-browser-tab", handler);
+    return () => ipcRenderer.removeListener("client:focus-browser-tab", handler);
+  },
   onNotifications: (callback: (notifications: ClientNotification[]) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, notifications: ClientNotification[]) => callback(notifications);
     ipcRenderer.on("client:notifications", handler);

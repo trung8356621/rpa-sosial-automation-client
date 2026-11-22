@@ -85,12 +85,14 @@ export function BrowserWorkspacePanel({
 
     if (visible) {
       updateBounds();
+      const rafId = requestAnimationFrame(() => updateBounds());
       const observer = new ResizeObserver(() => updateBounds());
       if (containerRef.current) {
         observer.observe(containerRef.current);
       }
       window.addEventListener("resize", updateBounds);
       return () => {
+        cancelAnimationFrame(rafId);
         observer.disconnect();
         window.removeEventListener("resize", updateBounds);
       };

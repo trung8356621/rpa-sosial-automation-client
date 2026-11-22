@@ -101,6 +101,20 @@ export function AppShell() {
       setLogs((prev) => [entry, ...prev.slice(0, 99)]);
     });
 
+    const unsubFocusBrowser = window.client.onFocusBrowserTab?.(() => {
+      setActiveTab("browser");
+    });
+
+    const unsubBrowserState = window.client.onBrowserStateChange((snap) => {
+      if (
+        snap.activeBrowserId &&
+        snap.viewState?.automationLock?.mode === "locked" &&
+        snap.viewState?.automationLock?.reason === "campaign_job"
+      ) {
+        setActiveTab("browser");
+      }
+    });
+
     // One-shot hydrate from main-process orchestrator (polling lives in Main, not renderer).
     void window.client.invoke<ClientNotification[]>({ type: "getNotifications" })
       .then((rows) => setNotifications(rows))
@@ -112,6 +126,8 @@ export function AppShell() {
       unsubNotifications();
       unsubWindowsNotif();
       unsubLog();
+      unsubFocusBrowser?.();
+      unsubBrowserState();
     };
   }, []);
 
@@ -165,7 +181,10 @@ export function AppShell() {
   const isOnline = state.status === "connected" && state.online;
   const isConnecting = state.status === "connecting";
   const showWindowsNotifBanner =
-    !uiLocked && windowsNotifStatus?.status === "Blocked" && !windowsNotifBannerDismissed;
+    !uiLocked &&
+    activeTab !== "browser" &&
+    windowsNotifStatus?.status === "Blocked" &&
+    !windowsNotifBannerDismissed;
 
   const selectTab = (tab: Tab) => {
     if (uiLocked && tab !== "settings") return;
@@ -267,7 +286,7 @@ export function AppShell() {
                   </div>
                 </div>
               )}
-              {notifications.length > 0 && (
+              {activeTab !== "browser" && notifications.length > 0 && (
                 <section className="notification-center" aria-label="Notification center">
                   <div className="notification-center-title">Yêu cầu cần xử lý ({notifications.length})</div>
                   {notifications.map((item) => (

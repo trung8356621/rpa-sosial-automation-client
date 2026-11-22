@@ -4,6 +4,54 @@ export const EXECUTION_VIEWPORT = {
   zoom: 1.0,
 } as const;
 
+export type ExecutionViewportVerification = {
+  windowMaximized: boolean;
+  visible: boolean;
+  bounds: { x: number; y: number; width: number; height: number };
+  innerWidth: number;
+  innerHeight: number;
+  deviceScaleFactor: number;
+  displayScaleFactor: number;
+  zoomFactor: number;
+  layoutStable: boolean;
+};
+
+export type ExecutionWindowLike = {
+  isDestroyed(): boolean;
+  isMinimized(): boolean;
+  restore(): void;
+  show(): void;
+  isMaximized(): boolean;
+  maximize(): void;
+  focus(): void;
+  getBounds(): { x: number; y: number; width: number; height: number };
+  webContents: {
+    isDestroyed(): boolean;
+    send(channel: string, payload: unknown): void;
+  };
+};
+
+export function prepareWindowForExecution(
+  win: ExecutionWindowLike | null | undefined,
+  browserId: string
+): { windowMaximized: boolean } {
+  if (!win || win.isDestroyed()) {
+    return { windowMaximized: false };
+  }
+  if (win.isMinimized()) {
+    win.restore();
+  }
+  win.show();
+  if (!win.isMaximized()) {
+    win.maximize();
+  }
+  win.focus();
+  if (!win.webContents.isDestroyed()) {
+    win.webContents.send("client:focus-browser-tab", { browserId });
+  }
+  return { windowMaximized: win.isMaximized() };
+}
+
 /**
  * Pin embedded WebContentsView dimensions to the fixed 1024x560 execution viewport
  * regardless of outer Electron window resize, maximize/restore, or sidebar changes.

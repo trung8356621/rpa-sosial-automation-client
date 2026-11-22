@@ -2,6 +2,7 @@ import type { WebContents } from "electron";
 import type { AuthReleasePulled, AuthScriptVariable } from "../auth/auth-script-types.js";
 import { AuthScriptRunner, type AuthRunOutcome } from "../auth/auth-script-runner.js";
 import type { AccountCredentialSource } from "../auth/credential-mapper.js";
+import type { ExecutionViewportVerification } from "../browser/embedded-browser.js";
 import type { AuthAssetDownloader } from "../orc/asset-store.js";
 import type { Rect } from "../orc/contracts.js";
 import { logClientError, logClientEvent } from "../main-error-log.js";
@@ -13,11 +14,19 @@ import {
   type CampaignJobClaim,
   type CampaignJobResultStatus,
 } from "./contracts.js";
+import type { FailureScreenshotArtifact } from "./failure-screenshot.js";
 import { JobAttemptIdempotencyStore } from "./idempotency.js";
 import { requireTitleBinding, resolveJobVariableBindings } from "./job-input-bindings.js";
 import { verifyWordPressDraft } from "./wordpress-draft-verify.js";
 
 export type CampaignJobBrowserHost = {
+  prepareForExecution?: (browserId: string) => void | Promise<void>;
+  verifyExecutionViewport?: () => Promise<ExecutionViewportVerification | null>;
+  captureFailureScreenshot?: (params: {
+    jobId: string;
+    attemptId: string;
+    code: string;
+  }) => Promise<FailureScreenshotArtifact | null>;
   open(browserId: string): Promise<void>;
   getWebContents(): WebContents | undefined;
   getAuthState?: () => { code: string; checkpointStatus?: string; message: string } | null;
@@ -176,6 +185,7 @@ export class CampaignJobExecutor {
       this.downloadAsset ?? this.scriptLoader.createAssetDownloader(claim);
 
     try {
+      await this.host.prepareForExecution?.(profile.browserId);
       await this.host.open(profile.browserId);
       const webContents = this.host.getWebContents();
       if (!webContents || webContents.isDestroyed()) {
@@ -246,6 +256,8 @@ export class CampaignJobExecutor {
         onStop: () => abort.abort("user_stop"),
       });
 
+      const viewportVerification = await this.host.verifyExecutionViewport?.();
+
       progressTimer = setInterval(() => {
         void this.api.progress(claim.job_id, {
           attempt_id: claim.attempt_id,
@@ -266,6 +278,7 @@ export class CampaignJobExecutor {
         contentDigest: pull.pinned.content_digest,
         executionDigest: pull.pinned.execution_digest,
         runMode: claim.run_mode,
+        viewport: viewportVerification ?? null,
       });
 
       const run = await this.runner.run({
@@ -366,6 +379,47 @@ export class CampaignJobExecutor {
       draftVerified?: boolean;
     }
   ): Promise<CampaignJobExecuteOutcome> {
+    let screenshotArtifact: FailureScreenshotArtifact | null = null;
+    if (status !== "succeeded" && this.host.captureFailureScreenshot) {
+      try {
+        screenshotArtifact = await this.host.captureFailureScreenshot({
+          jobId: claim.job_id,
+          attemptId: claim.attempt_id,
+          code,
+        });
+      } catch (err) {
+        screenshotArtifact = {
+          status: "capture_failed",
+          kind: "failure_screenshot",
+          job_id: claim.job_id,
+          attempt_id: claim.attempt_id,
+          error_code: code,
+          mime_type: "image/png",
+          sha256: null,
+          size_bytes: null,
+          width: null,
+          height: null,
+          local_path: null,
+          url: "",
+          redacted: false,
+          captured_at: new Date().toISOString(),
+          error_message: err instanceof Error ? err.message : String(err),
+        };
+      }
+      if (screenshotArtifact) {
+        logClientEvent("CAMPAIGN_JOB_FAILURE_SCREENSHOT", {
+          jobId: claim.job_id,
+          attemptId: claim.attempt_id,
+          errorCode: code,
+          captureStatus: screenshotArtifact.status,
+          redacted: screenshotArtifact.redacted,
+          sha256: screenshotArtifact.sha256,
+          localPath: screenshotArtifact.local_path,
+          errorMessage: screenshotArtifact.error_message ?? null,
+        });
+      }
+    }
+
     const body = {
       attempt_id: claim.attempt_id,
       lease_token: claim.lease_token,
@@ -374,6 +428,7 @@ export class CampaignJobExecutor {
         code,
         steps_executed: extra.stepsExecuted,
         ...(extra.output || {}),
+        ...(screenshotArtifact ? { screenshot_artifact: screenshotArtifact } : {}),
       },
       error:
         status === "succeeded"
@@ -382,6 +437,18 @@ export class CampaignJobExecutor {
               code,
               message: message.slice(0, 2000),
             },
+      ...(screenshotArtifact
+        ? {
+            artifacts: [
+              {
+                ...screenshotArtifact,
+                binary_upload_supported: false,
+                upload_note:
+                  "Backend /client/jobs/{jobId}/result accepts artifact metadata only; no binary screenshot upload endpoint exists.",
+              },
+            ],
+          }
+        : {}),
     };
     const res = await this.api.result(claim.job_id, body);
     if (res.ok) {
@@ -391,6 +458,8 @@ export class CampaignJobExecutor {
         jobId: claim.job_id,
         attemptId: claim.attempt_id,
         status,
+        screenshotCaptureStatus: screenshotArtifact?.status ?? null,
+        screenshotUploadStatus: screenshotArtifact ? "failed" : null,
         errors: res.errors,
         message: res.message,
       });
@@ -404,6 +473,8 @@ export class CampaignJobExecutor {
       idempotent: res.ok ? res.idempotent : false,
       stepsExecuted: extra.stepsExecuted,
       draftVerified: extra.draftVerified ?? false,
+      screenshotCaptureStatus: screenshotArtifact?.status ?? null,
+      screenshotUploadStatus: screenshotArtifact ? (res.ok ? "metadata_reported" : "failed") : null,
     });
     return {
       reported: res.ok,

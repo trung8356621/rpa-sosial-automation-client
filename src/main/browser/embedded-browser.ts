@@ -1,4 +1,4 @@
-import { WebContentsView, session, type BrowserWindow, type WebContents } from "electron";
+import { WebContentsView, screen, session, type BrowserWindow, type WebContents } from "electron";
 import type { BrowserProfile, BrowserViewState, SessionSignal } from "../../shared/contracts.js";
 import type { ProfileManager } from "./profile-manager.js";
 import type { BrowserSyncService } from "./browser-sync-service.js";
@@ -23,7 +23,14 @@ import {
   type BrowserClipboardIsolationHandle,
 } from "./browser-clipboard-isolation.js";
 import { BrowserInteractionLock } from "./browser-interaction-lock.js";
-import { EXECUTION_VIEWPORT, clampExecutionBounds } from "./execution-viewport.js";
+import {
+  EXECUTION_VIEWPORT,
+  clampExecutionBounds,
+  prepareWindowForExecution,
+  type ExecutionViewportVerification,
+} from "./execution-viewport.js";
+
+export type { ExecutionViewportVerification };
 
 export class EmbeddedBrowser {
   private view: WebContentsView | null = null;
@@ -211,6 +218,99 @@ export class EmbeddedBrowser {
       this.view.setVisible(visible);
     }
     this.notify();
+  }
+
+  /**
+   * Restore, show, maximize, and focus the Electron window, and switch the UI
+   * to the Browser tab for Campaign Job execution. Does not affect background polling.
+   */
+  prepareExecutionWindow(browserId: string): void {
+    const { windowMaximized } = prepareWindowForExecution(this.window, browserId);
+    logClientEvent("CAMPAIGN_JOB_WINDOW_VISIBLE", {
+      browserId,
+      windowMaximized,
+      visible: this.visible,
+    });
+  }
+
+  /**
+   * Confirm the Browser view is visible, maximized, laid out, and pinned to 1024x560
+   * with zoom=1.0 before OCR or coordinate-based actions run.
+   */
+  async verifyExecutionViewport(): Promise<ExecutionViewportVerification> {
+    if (this.activeBrowserId) {
+      this.prepareExecutionWindow(this.activeBrowserId);
+    }
+    this.setVisible(true);
+    this.setBounds(this.bounds);
+
+    const wc = this.view?.webContents;
+    let innerWidth = this.bounds.width;
+    let innerHeight = this.bounds.height;
+    let deviceScaleFactor = 1;
+    let zoomFactor: number = EXECUTION_VIEWPORT.zoom;
+    let layoutStable = false;
+
+    if (wc && !wc.isDestroyed()) {
+      const deadline = Date.now() + 1200;
+      let prevKey = "";
+      while (Date.now() < deadline) {
+        try {
+          wc.setZoomFactor(EXECUTION_VIEWPORT.zoom);
+          zoomFactor = wc.getZoomFactor();
+          const metrics = (await wc.executeJavaScript(
+            "({ w: window.innerWidth || 0, h: window.innerHeight || 0, dpr: window.devicePixelRatio || 1 })",
+            true
+          )) as { w: number; h: number; dpr: number };
+          innerWidth = Number(metrics?.w) || 0;
+          innerHeight = Number(metrics?.h) || 0;
+          deviceScaleFactor = Number(metrics?.dpr) || 1;
+          const key = `${innerWidth}x${innerHeight}`;
+          if (
+            innerWidth === EXECUTION_VIEWPORT.width &&
+            innerHeight === EXECUTION_VIEWPORT.height &&
+            prevKey === key
+          ) {
+            layoutStable = true;
+            break;
+          }
+          prevKey = key;
+        } catch {
+          // ignore transient navigation/executeJavaScript race while settling
+        }
+        await new Promise((r) => setTimeout(r, 120));
+      }
+    }
+
+    let displayScaleFactor = deviceScaleFactor;
+    try {
+      if (this.window && !this.window.isDestroyed()) {
+        displayScaleFactor = screen.getDisplayMatching(this.window.getBounds()).scaleFactor || displayScaleFactor;
+      }
+    } catch {
+      // ignore if screen API unavailable
+    }
+
+    const windowMaximized = Boolean(
+      this.window && !this.window.isDestroyed() && this.window.isMaximized()
+    );
+
+    const result: ExecutionViewportVerification = {
+      windowMaximized,
+      visible: this.visible,
+      bounds: { ...this.bounds },
+      innerWidth,
+      innerHeight,
+      deviceScaleFactor,
+      displayScaleFactor,
+      zoomFactor,
+      layoutStable,
+    };
+    logClientEvent("EXECUTION_VIEWPORT_VERIFIED", {
+      browserId: this.activeBrowserId,
+      ...result,
+    });
+    return result;
   }
 
   async clearPartitionStorage(partition: string): Promise<void> {
