@@ -40,6 +40,9 @@ export function createCampaignJobBrowserHost(params: {
       // No Action Tag — job script is separate from Auth pipeline on open.
       await embeddedBrowser.open(browserId, undefined, null);
     },
+    async navigate(url: string) {
+      await embeddedBrowser.navigate(url);
+    },
     getWebContents() {
       return embeddedBrowser.getWebContents();
     },

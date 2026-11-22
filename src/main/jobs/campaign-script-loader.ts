@@ -1,7 +1,11 @@
 import { SeoOpsHttpError } from "../../shared/seo-ops-http.js";
 import type { ClientConnection } from "../connection/client-connection.js";
-import type { AuthReleasePulled } from "../auth/auth-script-types.js";
-import { parsePulledRelease } from "../auth/auth-script-types.js";
+import {
+  parseExecutionContext,
+  parsePulledRelease,
+  type AuthExecutionContext,
+  type AuthReleasePulled,
+} from "../auth/auth-script-types.js";
 import type { AuthAssetDownloader } from "../orc/asset-store.js";
 import {
   CAMPAIGN_SCRIPT_APIS_AVAILABLE,
@@ -26,6 +30,7 @@ export type CampaignScriptPullOutcome =
       kind: "ok";
       release: CampaignReleasePulled;
       pinned: CampaignScriptPin;
+      executionContext?: AuthExecutionContext;
     }
   | { kind: "contract_gap"; gap: CampaignScriptContractGap }
   | { kind: "error"; code: string; message: string };
@@ -70,7 +75,7 @@ export class CampaignScriptLoader {
     if (this.pullImpl) {
       const out = await this.pullImpl(claim);
       if (out.kind !== "ok") return out;
-      return this.validatePinned(pin, out.release);
+      return this.validatePinned(pin, out.release, out.executionContext);
     }
 
     if (!this.connection) {
@@ -117,7 +122,15 @@ export class CampaignScriptLoader {
         };
       }
 
-      return this.validatePinned(pin, release);
+      const releaseRaw =
+        res.release && typeof res.release === "object" && !Array.isArray(res.release)
+          ? (res.release as Record<string, unknown>)
+          : undefined;
+      const executionContext =
+        parseExecutionContext(res.execution_context, res.resolved_url) ??
+        parseExecutionContext(releaseRaw?.execution_context, releaseRaw?.resolved_url);
+
+      return this.validatePinned(pin, release, executionContext);
     } catch (err) {
       return mapPullError(err);
     }
@@ -164,7 +177,8 @@ export class CampaignScriptLoader {
 
   private validatePinned(
     pin: CampaignScriptPin,
-    release: CampaignReleasePulled
+    release: CampaignReleasePulled,
+    executionContext?: AuthExecutionContext
   ): CampaignScriptPullOutcome {
     if (release.package_key !== pin.package_key) {
       return {
@@ -220,7 +234,7 @@ export class CampaignScriptLoader {
       // Action Script path must not silently accept Auth packages for create_post.
       // Allow only when claim intentionally pinned an auth package (rare); still OK to run ORC.
     }
-    return { kind: "ok", release, pinned: pin };
+    return { kind: "ok", release, pinned: pin, ...(executionContext ? { executionContext } : {}) };
   }
 }
 

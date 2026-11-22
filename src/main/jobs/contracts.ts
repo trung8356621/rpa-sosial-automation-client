@@ -6,6 +6,10 @@
  *   POST /api/v1/social-automation/client/scripts/asset
  * GitHub openapi.yaml @5554eda still lags — do not treat that commit as source of truth.
  */
+import {
+  parseExecutionContext,
+  type AuthExecutionContext,
+} from "../auth/auth-script-types.js";
 
 export type CampaignRunMode = "test" | "live";
 export type CampaignExecutionMode = "one_account_one_job" | "one_account_many_jobs";
@@ -44,6 +48,7 @@ export type CampaignJobClaim = {
   release_id?: number;
   content_digest?: string;
   execution_digest?: string;
+  execution_context?: AuthExecutionContext;
 };
 
 export type CampaignJobAckRequest = {
@@ -149,6 +154,7 @@ export function parseCampaignJobClaim(raw: unknown): CampaignJobClaim | null {
     release_id: posInt(r.release_id),
     content_digest: digestHex(r.content_digest) || undefined,
     execution_digest: digestHex(r.execution_digest) || undefined,
+    execution_context: parseExecutionContext(r.execution_context, r.resolved_url),
   };
 }
 

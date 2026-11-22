@@ -1,4 +1,5 @@
 import type { WebContents } from "electron";
+import { validateAuthNavigationTarget } from "../auth/auth-navigation.js";
 import type { AuthReleasePulled, AuthScriptVariable } from "../auth/auth-script-types.js";
 import { AuthScriptRunner, type AuthRunOutcome } from "../auth/auth-script-runner.js";
 import type { AccountCredentialSource } from "../auth/credential-mapper.js";
@@ -28,6 +29,7 @@ export type CampaignJobBrowserHost = {
     code: string;
   }) => Promise<FailureScreenshotArtifact | null>;
   open(browserId: string): Promise<void>;
+  navigate?: (url: string) => Promise<void>;
   getWebContents(): WebContents | undefined;
   getAuthState?: () => { code: string; checkpointStatus?: string; message: string } | null;
   getBounds(): Rect;
@@ -248,6 +250,67 @@ export class CampaignJobExecutor {
         return await this.reportTerminal(claim, "failed", "INPUT_BINDING_FAILED", titleCheck.message, {
           stepsExecuted: 0,
         });
+      }
+
+      const entryContext = pull.executionContext ?? claim.execution_context;
+      const resolvedEntryUrl = entryContext?.resolvedUrl?.trim() || "";
+      const hasNavigateStep =
+        Array.isArray(pull.release.manifest.steps) &&
+        pull.release.manifest.steps.some((s) => {
+          const action = String((s as Record<string, unknown>)?.action || "").trim().toLowerCase();
+          return action === "navigate" || action === "goto" || action === "open_url";
+        });
+
+      if (resolvedEntryUrl) {
+        const validated = validateAuthNavigationTarget({
+          targetUrl: resolvedEntryUrl,
+          authorizedSiteUrl: account.siteUrl,
+        });
+        if (!validated.ok) {
+          return await this.reportTerminal(
+            claim,
+            "failed",
+            "ACTION_NAVIGATION_FAILED",
+            validated.reason,
+            { stepsExecuted: 0 }
+          );
+        }
+        if (!this.host.navigate) {
+          return await this.reportTerminal(
+            claim,
+            "failed",
+            "ACTION_NAVIGATION_FAILED",
+            "Host không hỗ trợ navigate tới Action entry URL.",
+            { stepsExecuted: 0 }
+          );
+        }
+        logClientEvent("CAMPAIGN_JOB_NAVIGATE", {
+          jobId: claim.job_id,
+          attemptId: claim.attempt_id,
+          targetUrl: validated.url,
+          actionTagKey: claim.action_tag_key ?? null,
+          source: entryContext?.source ?? null,
+        });
+        try {
+          await this.host.navigate(validated.url);
+        } catch (navErr) {
+          const navMsg = navErr instanceof Error ? navErr.message : String(navErr);
+          return await this.reportTerminal(
+            claim,
+            "failed",
+            "ACTION_NAVIGATION_FAILED",
+            `Không điều hướng được tới Action entry URL (${validated.url}): ${navMsg}`,
+            { stepsExecuted: 0 }
+          );
+        }
+      } else if (!hasNavigateStep && (Boolean(entryContext) || Boolean(this.host.navigate))) {
+        return await this.reportTerminal(
+          claim,
+          "failed",
+          "ACTION_ENTRY_URL_MISSING",
+          "Thiếu execution_context.resolved_url cho Action Script không có bước navigate.",
+          { stepsExecuted: 0 }
+        );
       }
 
       await this.host.lock({
