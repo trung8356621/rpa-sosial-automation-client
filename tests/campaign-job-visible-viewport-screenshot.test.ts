@@ -19,6 +19,10 @@ import {
   prepareWindowForExecution,
   type ExecutionWindowLike,
 } from "../src/main/browser/execution-viewport.js";
+import {
+  parseDevInstanceId,
+  resolveInstanceWindowTitle,
+} from "../src/main/dev-instance.js";
 import type { AuthScriptRunner } from "../src/main/auth/auth-script-runner.js";
 import type { CampaignReleasePulled } from "../src/main/jobs/campaign-script-loader.js";
 
@@ -181,21 +185,29 @@ test("Task A & B: CampaignJobExecutor restores/maximizes window, switches tab, v
   assert.equal(resultBodies.length, 1);
 });
 
-test("Task A & B: prepareWindowForExecution restores, maximizes, focuses, and signals renderer", async () => {
+test("Task A & B: prepareWindowForExecution restores, maximizes, uses showInactive without stealing focus", async () => {
   let restored = false;
   let shown = false;
+  let shownInactive = false;
   let maximized = false;
   let focused = false;
+  let visible = false;
   const sentMessages: Array<{ channel: string; payload: unknown }> = [];
 
   const fakeWindow: ExecutionWindowLike = {
     isDestroyed: () => false,
     isMinimized: () => true,
+    isVisible: () => visible,
     restore: () => {
       restored = true;
     },
     show: () => {
       shown = true;
+      visible = true;
+    },
+    showInactive: () => {
+      shownInactive = true;
+      visible = true;
     },
     isMaximized: () => maximized,
     maximize: () => {
@@ -216,13 +228,21 @@ test("Task A & B: prepareWindowForExecution restores, maximizes, focuses, and si
   const res = prepareWindowForExecution(fakeWindow, "br-123");
 
   assert.equal(restored, true);
-  assert.equal(shown, true);
+  assert.equal(shown, false);
+  assert.equal(shownInactive, true);
   assert.equal(maximized, true);
   assert.equal(res.windowMaximized, true);
-  assert.equal(focused, true);
+  assert.equal(focused, false);
   assert.deepEqual(sentMessages, [
     { channel: "client:focus-browser-tab", payload: { browserId: "br-123" } },
   ]);
+
+  // Subsequent calls when already visible & maximized must not re-show or steal focus
+  shownInactive = false;
+  maximized = true;
+  prepareWindowForExecution(fakeWindow, "br-123");
+  assert.equal(shownInactive, false);
+  assert.equal(focused, false);
 
   // Viewport clamping preserves 1024x560 regardless of maximized window dimensions
   const clamped = clampExecutionBounds({ x: 250, y: 120, width: 1600, height: 900 });
@@ -232,6 +252,14 @@ test("Task A & B: prepareWindowForExecution restores, maximizes, focuses, and si
     width: EXECUTION_VIEWPORT.width,
     height: EXECUTION_VIEWPORT.height,
   });
+});
+
+test("Task A (Titles): resolveInstanceWindowTitle maps client-A/B/C and single-instance default", () => {
+  assert.equal(resolveInstanceWindowTitle(parseDevInstanceId(["node", "main.js", "--instance=client-A"], {})), "RPA Client A");
+  assert.equal(resolveInstanceWindowTitle(parseDevInstanceId(["node", "main.js", "--instance=client-B"], {})), "RPA Client B");
+  assert.equal(resolveInstanceWindowTitle(parseDevInstanceId(["node", "main.js", "--instance=client-C"], {})), "RPA Client C");
+  assert.equal(resolveInstanceWindowTitle(parseDevInstanceId(["node", "main.js"], {})), "RPA Client");
+  assert.equal(resolveInstanceWindowTitle(null), "RPA Client");
 });
 
 test("Task D: Failure screenshot captured before release for ORC_ERROR, AUTH_EXECUTION_FAILED, NOT_FOUND", async () => {

@@ -19,8 +19,10 @@ export type ExecutionViewportVerification = {
 export type ExecutionWindowLike = {
   isDestroyed(): boolean;
   isMinimized(): boolean;
+  isVisible?: () => boolean;
   restore(): void;
   show(): void;
+  showInactive?: () => void;
   isMaximized(): boolean;
   maximize(): void;
   focus(): void;
@@ -41,11 +43,17 @@ export function prepareWindowForExecution(
   if (win.isMinimized()) {
     win.restore();
   }
-  win.show();
+  const alreadyVisible = typeof win.isVisible === "function" ? win.isVisible() : false;
+  if (!alreadyVisible) {
+    if (typeof win.showInactive === "function") {
+      win.showInactive();
+    } else {
+      win.show();
+    }
+  }
   if (!win.isMaximized()) {
     win.maximize();
   }
-  win.focus();
   if (!win.webContents.isDestroyed()) {
     win.webContents.send("client:focus-browser-tab", { browserId });
   }

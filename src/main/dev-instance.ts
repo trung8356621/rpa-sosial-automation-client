@@ -9,6 +9,16 @@ export function isAllowedDevInstance(value: string | undefined | null): value is
   return Boolean(value && DEV_INSTANCE_PATTERN.test(value));
 }
 
+/**
+ * Resolve instance-specific Electron BrowserWindow & taskbar title.
+ * client-A -> "RPA Client A", client-B -> "RPA Client B", default -> "RPA Client".
+ */
+export function resolveInstanceWindowTitle(instanceId: DevInstanceId | null | undefined): string {
+  if (!instanceId) return "RPA Client";
+  const suffix = instanceId.startsWith("client-") ? instanceId.slice("client-".length) : instanceId;
+  return suffix ? `RPA Client ${suffix}` : "RPA Client";
+}
+
 export interface DevInstanceConfig {
   instanceId?: string;
   socketEnabled?: boolean;

@@ -40,6 +40,7 @@ import {
   parseDevInstanceId,
   readDevInstanceConfig,
   resolveDevUserDataPath,
+  resolveInstanceWindowTitle,
   type InstanceLockHandle,
 } from "./dev-instance.js";
 
@@ -228,12 +229,13 @@ function broadcastBrowserState(): void {
 
 function createWindow(): BrowserWindow {
   const iconPath = resolveAppIconPath(project);
+  const windowTitle = resolveInstanceWindowTitle(devInstanceId);
   const win = new BrowserWindow({
     width: 1040,
     height: 760,
     minWidth: 860,
     minHeight: 640,
-    title: "RPA Execution Client V2",
+    title: windowTitle,
     ...(iconPath ? { icon: iconPath } : {}),
     backgroundColor: "#0d131f",
     webPreferences: {
@@ -242,6 +244,19 @@ function createWindow(): BrowserWindow {
       nodeIntegration: false,
       sandbox: false,
     },
+  });
+
+  win.setTitle(windowTitle);
+  win.on("page-title-updated", (event) => {
+    event.preventDefault();
+    if (!win.isDestroyed()) {
+      win.setTitle(windowTitle);
+    }
+  });
+  win.webContents.on("did-finish-load", () => {
+    if (!win.isDestroyed()) {
+      win.setTitle(windowTitle);
+    }
   });
 
   Menu.setApplicationMenu(null);
