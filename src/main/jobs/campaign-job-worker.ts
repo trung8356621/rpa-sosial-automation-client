@@ -137,6 +137,16 @@ export class CampaignJobWorker {
         scriptId: claimed.data.script_id,
         scriptVersion: claimed.data.script_version,
         runMode: claimed.data.run_mode,
+        variantGroupId: claimed.data.variant_group_id ?? null,
+        scriptVariants: Array.isArray(claimed.data.script_variants)
+          ? claimed.data.script_variants.map((v) => ({
+              variantId: v.variant_id ?? null,
+              languageLabel: v.language_label ?? null,
+              packageKey: v.package_key ?? null,
+              releaseId: v.release_id ?? null,
+              priority: v.priority ?? null,
+            }))
+          : [],
       });
 
       const out = await this.executor.execute(claimed.data);

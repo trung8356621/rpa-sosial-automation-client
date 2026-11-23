@@ -21,6 +21,20 @@ import { VisualOrcExecutor } from "../orc/visual-executor.js";
 import { authStepToVisualPayload } from "../orc/step-to-payload.js";
 import type { Rect } from "../orc/contracts.js";
 
+export type AuthExecutionProgressEvent =
+  | {
+      kind: "step_phase";
+      stepNumber: number;
+      totalSteps: number;
+      phase: "OCR" | "Click" | "Type" | "Wait" | "Scroll" | "DOM";
+    }
+  | {
+      kind: "step_failed";
+      stepNumber: number;
+      totalSteps: number;
+      code: string;
+    };
+
 export type AuthRunOutcome =
   | { kind: "ok"; stepsExecuted: number }
   | { kind: "timeout"; message: string; stepsExecuted: number }
@@ -71,6 +85,7 @@ export class AuthScriptRunner {
     downloadAsset?: AuthAssetDownloader;
     /** Job/campaign input bindings (e.g. title) merged after credential resolve. */
     inputValues?: Record<string, string>;
+    onProgress?: (event: AuthExecutionProgressEvent) => void;
   }): Promise<AuthRunOutcome> {
     const { webContents, release, account, signal } = params;
     const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -218,8 +233,11 @@ export class AuthScriptRunner {
 
         const step = steps[i];
         const kind = classifications[i].c.kind;
+        const stepNumber = i + 1;
+        const totalSteps = steps.length;
 
         if (kind === "dom") {
+          params.onProgress?.({ kind: "step_phase", stepNumber, totalSteps, phase: "DOM" });
           await executeDomStep(webContents, step, bindings.values, deadline);
         } else if (kind === "orc_visual") {
           if (!orc || !templates) {
@@ -267,6 +285,15 @@ export class AuthScriptRunner {
             });
           }
 
+          if (
+            payload.action === "WAIT_VERIFY" ||
+            payload.action === "SLEEP"
+          ) {
+            params.onProgress?.({ kind: "step_phase", stepNumber, totalSteps, phase: "Wait" });
+          } else if (payload.action === "SCROLL") {
+            params.onProgress?.({ kind: "step_phase", stepNumber, totalSteps, phase: "Scroll" });
+          }
+
           const out = await orc.executeVisualStep({
             payload,
             template,
@@ -275,6 +302,14 @@ export class AuthScriptRunner {
             stepName: typeof step.name === "string" ? step.name : undefined,
             authorizedSiteUrl: params.account.siteUrl,
             signal,
+            onPhase: (phase) => {
+              params.onProgress?.({
+                kind: "step_phase",
+                stepNumber,
+                totalSteps,
+                phase: phase === "ocr" ? "OCR" : phase === "click" ? "Click" : "Type",
+              });
+            },
           });
           if (out.kind === "blocked" && out.code === "CANCELLED") {
             return {
@@ -284,6 +319,12 @@ export class AuthScriptRunner {
             };
           }
           if (out.kind === "blocked" && out.code === "VIEWPORT_MISMATCH") {
+            params.onProgress?.({
+              kind: "step_failed",
+              stepNumber,
+              totalSteps,
+              code: "VIEWPORT_MISMATCH",
+            });
             return {
               kind: "viewport_mismatch",
               message: `Step ${i}: ${out.message}`,
@@ -298,12 +339,19 @@ export class AuthScriptRunner {
               !mutated &&
               out.kind === "blocked" &&
               out.confirmedNotFound === true;
+            const failureCode = out.kind === "blocked" ? out.code : "ORC_ERROR";
+            params.onProgress?.({
+              kind: "step_failed",
+              stepNumber,
+              totalSteps,
+              code: failureCode,
+            });
             return {
               kind: "error",
               message: `Step ${i}: ${out.message}`,
               stepsExecuted,
               stepIndex: i,
-              code: out.kind === "blocked" ? out.code : "ORC_ERROR",
+              code: failureCode,
               confirmedNotFound,
               mutated,
             };

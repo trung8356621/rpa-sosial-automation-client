@@ -1,5 +1,5 @@
 import { WebContentsView, screen, session, type BrowserWindow, type WebContents } from "electron";
-import type { BrowserProfile, BrowserViewState, SessionSignal } from "../../shared/contracts.js";
+import type { BrowserProfile, BrowserViewState, ExecutionStatus, SessionSignal } from "../../shared/contracts.js";
 import type { ProfileManager } from "./profile-manager.js";
 import type { BrowserSyncService } from "./browser-sync-service.js";
 import { resolveInitialUrl } from "./url-resolver.js";
@@ -49,6 +49,7 @@ export class EmbeddedBrowser {
   private authOrchestrator: BrowserOpenOrchestrator | null = null;
   private authContextFinder: AuthContextFinder | null = null;
   private lastAuthResult: AuthPipelineResult | null = null;
+  private executionStatus: ExecutionStatus | null = null;
   private clipboardIsolation: BrowserClipboardIsolationHandle | null = null;
   private readonly interactionLock: BrowserInteractionLock;
   private authAbort: AbortController | null = null;
@@ -110,7 +111,13 @@ export class EmbeddedBrowser {
         message: lock.message,
         reason: lock.reason,
       },
+      executionStatus: this.executionStatus,
     };
+  }
+
+  setExecutionStatus(status: ExecutionStatus | null): void {
+    this.executionStatus = status;
+    this.notify();
   }
 
   getWebContents() {
@@ -336,6 +343,7 @@ export class EmbeddedBrowser {
 
     // Single active browser constraint: Close current if open for a different profile
     if (this.view && this.activeBrowserId !== browserId) {
+      this.executionStatus = null;
       await this.stop();
     }
 

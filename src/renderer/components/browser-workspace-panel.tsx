@@ -398,7 +398,11 @@ export function BrowserWorkspacePanel({
 
       {viewState?.automationLock?.mode === "locked" && (
         <div className="browser-error-banner" style={{ background: "#0f172a", color: "#e2e8f0" }}>
-          <span>{viewState.automationLock.message || "Automation đang chạy — Vui lòng không thao tác"}</span>
+          <span>
+            {viewState.executionStatus?.text ||
+              viewState.automationLock.message ||
+              "Automation đang chạy — Vui lòng không thao tác"}
+          </span>
           <button
             type="button"
             className="browser-btn"
@@ -409,6 +413,14 @@ export function BrowserWorkspacePanel({
           </button>
         </div>
       )}
+
+      {viewState?.automationLock?.mode !== "locked" &&
+        viewState?.automationLock?.mode !== "human" &&
+        viewState?.executionStatus?.tone === "failed" && (
+          <div className="browser-error-banner" role="status" style={{ fontSize: 12 }}>
+            <span>{viewState.executionStatus.text}</span>
+          </div>
+        )}
 
       {viewState?.automationLock?.mode === "human" && (
         <div className="browser-error-banner" style={{ background: "#78350f", color: "#fffbeb" }}>

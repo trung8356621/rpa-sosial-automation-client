@@ -33,6 +33,22 @@ export type VisualStepOutcome =
     }
   | { kind: "error"; message: string; mutated?: boolean };
 
+function classifyTargetNotConfident(
+  err: TargetNotConfident,
+  confirmedNotFound: boolean
+): { code: string; matchResult: string } {
+  if (confirmedNotFound) {
+    return { code: "NOT_FOUND", matchResult: "not_confident" };
+  }
+  if (err.message.startsWith("SCROLL_CONTAINER_CHANGED:")) {
+    return { code: "SCROLL_CONTAINER_CHANGED", matchResult: "scroll_container_changed" };
+  }
+  if (err.message.startsWith("SCAN_RESET_FAILED:")) {
+    return { code: "SCAN_RESET_FAILED", matchResult: "scan_reset_failed" };
+  }
+  return { code: "TARGET_NOT_CONFIDENT", matchResult: "not_confident" };
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -97,12 +113,14 @@ export class VisualOrcExecutor {
     inspectCheckboxState?: () => Promise<CheckboxState | CheckboxInspectResult>;
     checkCheckbox?: () => Promise<boolean>;
     signal?: AbortSignal;
+    onPhase?: (phase: "ocr" | "click" | "type") => void;
   }): Promise<VisualStepOutcome> {
-    const { payload, template, text, stepId, stepName, authorizedSiteUrl, signal } = params;
+    const { payload, template, text, stepId, stepName, authorizedSiteUrl, signal, onPhase } = params;
     const action = payload.action;
 
     if (action === "TYPE_ONLY") {
       if (!text) return { kind: "error", message: "TYPE_ONLY thiếu text" };
+      onPhase?.("type");
       await this.host.typeText(text);
       return { kind: "ok", action };
     }
@@ -211,6 +229,8 @@ export class VisualOrcExecutor {
         (() => checkWordPressRememberMeCheckbox(this.host.webContents, authorizedSiteUrl)))
       : null;
 
+    let mutated = false;
+
     try {
       if (inspectCheckbox) {
         const beforeCtx = await inspectCheckbox();
@@ -275,7 +295,6 @@ export class VisualOrcExecutor {
       let searchRegion: Rect | undefined;
       let current = before;
       let match: { x: number; y: number; method?: string; score: number } | undefined;
-      let mutated = false;
 
       if (matchTo) await clearOcrSearch(this.host.webContents);
 
@@ -337,6 +356,7 @@ export class VisualOrcExecutor {
               searchRegion,
               (event) => {
                 if (event.phase === "start") {
+                  onPhase?.("ocr");
                   logClientEvent("ORC_OCR_START", {
                     expectedKind: payload.target?.ocr?.kind,
                     hasExpectedText: Boolean(payload.target?.ocr?.text),
@@ -371,10 +391,11 @@ export class VisualOrcExecutor {
                   !error.ambiguous &&
                   ((error instanceof OcrNotFound && error.outcome === "NOT_FOUND") ||
                     error.resolution?.ocrOutcome === "NOT_FOUND");
-                emitDiagnostic("not_confident", error.message, error.message);
+                const { code, matchResult } = classifyTargetNotConfident(error, confirmedNotFound);
+                emitDiagnostic(matchResult, error.message, error.message, "blocked");
                 return {
                   kind: "blocked",
-                  code: confirmedNotFound ? "NOT_FOUND" : "TARGET_NOT_CONFIDENT",
+                  code,
                   message: error.message,
                   confirmedNotFound,
                   mutated,
@@ -434,6 +455,7 @@ export class VisualOrcExecutor {
       }
 
       mutated = true;
+      onPhase?.("click");
       this.host.click(match.x, match.y, current.width, current.height);
       logClientEvent("ORC_CLICK", {
         action,
@@ -467,11 +489,23 @@ export class VisualOrcExecutor {
         if (!text) {
           return { kind: "error", message: "CLICK_AND_TYPE thiếu text/variable binding" };
         }
+        onPhase?.("type");
         await this.host.typeText(text);
       }
 
       return { kind: "ok", action, x: match.x, y: match.y, method: match.method };
     } catch (err) {
+      if (err instanceof TargetNotConfident) {
+        const { code, matchResult } = classifyTargetNotConfident(err, false);
+        emitDiagnostic(matchResult, err.message, err.message, "blocked");
+        return {
+          kind: "blocked",
+          code,
+          message: err.message,
+          confirmedNotFound: false,
+          mutated,
+        };
+      }
       const message = err instanceof Error ? err.message : String(err);
       emitDiagnostic(
         /Viewport|Screenshot viewport|Zoom/.test(message) ? "viewport_mismatch" : "error",

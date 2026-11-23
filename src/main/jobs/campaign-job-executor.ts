@@ -2,6 +2,12 @@ import type { WebContents } from "electron";
 import { validateAuthNavigationTarget } from "../auth/auth-navigation.js";
 import type { AuthReleasePulled, AuthScriptVariable } from "../auth/auth-script-types.js";
 import { AuthScriptRunner, type AuthRunOutcome } from "../auth/auth-script-runner.js";
+import type { ExecutionStatus } from "../../shared/contracts.js";
+import {
+  formatFallbackTransitionStatus,
+  formatStepFailedStatus,
+  formatStepPhaseStatus,
+} from "../../shared/execution-status.js";
 import type { AccountCredentialSource } from "../auth/credential-mapper.js";
 import type { ExecutionViewportVerification } from "../browser/embedded-browser.js";
 import type { AuthAssetDownloader } from "../orc/asset-store.js";
@@ -59,6 +65,7 @@ export type CampaignJobBrowserHost = {
   restoreViewport(): void | Promise<void>;
   lock(params: { reason?: string; message?: string; onStop?: () => void }): Promise<void>;
   release(reason?: string): Promise<void>;
+  updateExecutionStatus?: (status: ExecutionStatus | null) => void;
   findProfileForJob(claim: CampaignJobClaim): {
     ok: true;
     browserId: string;
@@ -333,6 +340,8 @@ export class CampaignJobExecutor {
       let lastNavigatedUrl = "";
       let hostLocked = false;
       let viewportVerification: ExecutionViewportVerification | null | undefined;
+      let fallbackFromLanguage: string | null = null;
+      let lastFailureStatus: ExecutionStatus | null = null;
 
       for (let idx = 0; idx < variantsToExecute.length; idx++) {
         const entry = variantsToExecute[idx];
@@ -502,6 +511,7 @@ export class CampaignJobExecutor {
         }
 
         if (!hostLocked) {
+          this.host.updateExecutionStatus?.(null);
           await this.host.lock({
             reason: "campaign_job",
             message: "Campaign Job đang chạy — Vui lòng không thao tác",
@@ -517,6 +527,20 @@ export class CampaignJobExecutor {
               step: `steps=${stepsExecuted}`,
             });
           }, PROGRESS_INTERVAL_MS);
+        }
+
+        if (fallbackFromLanguage && variant) {
+          const totalSteps = Array.isArray(pull.release.manifest.steps)
+            ? pull.release.manifest.steps.length
+            : 1;
+          this.host.updateExecutionStatus?.(
+            formatFallbackTransitionStatus({
+              fromLanguage: fallbackFromLanguage,
+              toLanguage: variant.language_label,
+              stepNumber: 1,
+              totalSteps,
+            })
+          );
         }
 
         logClientEvent("CAMPAIGN_JOB_EXECUTE_START", {
@@ -553,6 +577,28 @@ export class CampaignJobExecutor {
           restoreViewport: () => this.host.restoreViewport(),
           downloadAsset,
           inputValues: bindings.values,
+          onProgress: (ev) => {
+            if (ev.kind === "step_phase") {
+              this.host.updateExecutionStatus?.(
+                formatStepPhaseStatus({
+                  stepNumber: ev.stepNumber,
+                  totalSteps: ev.totalSteps,
+                  phase: ev.phase,
+                  activeLanguage: variant?.language_label ?? null,
+                  isFallback: Boolean(fallbackFromLanguage),
+                })
+              );
+            } else if (ev.kind === "step_failed") {
+              lastFailureStatus = formatStepFailedStatus({
+                stepNumber: ev.stepNumber,
+                totalSteps: ev.totalSteps,
+                code: ev.code,
+                activeLanguage: variant?.language_label ?? null,
+                isFallback: Boolean(fallbackFromLanguage),
+              });
+              this.host.updateExecutionStatus?.(lastFailureStatus);
+            }
+          },
         });
 
         stepsExecuted = run.stepsExecuted;
@@ -594,6 +640,8 @@ export class CampaignJobExecutor {
 
           if (canFallback && variant) {
             const nextVariant = variantsToExecute[idx + 1].variant!;
+            fallbackFromLanguage = variant.language_label;
+            lastFailureStatus = null;
             logClientEvent("CAMPAIGN_JOB_VARIANT_FALLBACK", {
               jobId: claim.job_id,
               attemptId: claim.attempt_id,
@@ -610,6 +658,15 @@ export class CampaignJobExecutor {
             continue;
           }
 
+          if (mapped.status === "cancelled") {
+            this.host.updateExecutionStatus?.(null);
+          } else if (!lastFailureStatus) {
+            this.host.updateExecutionStatus?.({
+              text: `Failed: ${mapped.code}`,
+              tone: "failed",
+            });
+          }
+
           return await this.reportTerminal(claim, mapped.status, mapped.code, mapped.message, {
             stepsExecuted,
             preCapturedScreenshots: failureScreenshots,
@@ -624,6 +681,10 @@ export class CampaignJobExecutor {
           title: titleCheck.title || bindings.values.title || "",
         });
         if (!draft.verified) {
+          this.host.updateExecutionStatus?.({
+            text: "Failed: DRAFT_NOT_VERIFIED",
+            tone: "failed",
+          });
           if (variant) {
             attemptedVariants.push({
               variant_id: variant.variant_id,
@@ -672,7 +733,8 @@ export class CampaignJobExecutor {
           });
         }
 
-        // On success: keep ONE final success screenshot.
+        // On success: clear execution status and keep ONE final success screenshot.
+        this.host.updateExecutionStatus?.(null);
         let successShot: FailureScreenshotArtifact | null = null;
         if (this.host.captureSuccessScreenshot) {
           try {

@@ -99,6 +99,9 @@ export function createCampaignJobBrowserHost(params: {
     async release(reason) {
       await embeddedBrowser.releaseAutomationLock(reason);
     },
+    updateExecutionStatus(status) {
+      embeddedBrowser.setExecutionStatus(status);
+    },
     findProfileForJob(claim: CampaignJobClaim) {
       const byBrowser = profileManager.get(claim.browser_id);
       if (byBrowser) {

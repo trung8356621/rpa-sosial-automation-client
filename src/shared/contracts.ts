@@ -111,6 +111,11 @@ export interface BrowserProfile {
 
 export type AutomationLockMode = "off" | "locked" | "human";
 
+export interface ExecutionStatus {
+  text: string;
+  tone: "running" | "fallback" | "failed";
+}
+
 export interface BrowserViewState {
   activeBrowserId: string | null;
   currentUrl: string;
@@ -128,6 +133,7 @@ export interface BrowserViewState {
     message: string | null;
     reason: string | null;
   };
+  executionStatus?: ExecutionStatus | null;
 }
 
 export interface BrowserStateSnapshot {
