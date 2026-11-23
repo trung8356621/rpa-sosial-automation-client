@@ -289,7 +289,7 @@ test("2. Step 0 OCR error does not execute subsequent steps and SCROLL_CONTAINER
     });
     const statuses: Array<ExecutionStatus | null> = [];
     const host = makeFakeHost(wc, statuses);
-    const { api } = makeFakeApi();
+    const { api, results } = makeFakeApi();
 
     let viStep0Called = false;
     let enStep0Called = false;
@@ -387,7 +387,7 @@ test("3. Confirmed first-step NOT_FOUND triggers eligible language fallback and 
     const wc = makeFakeWebContents({ draftVerified: true });
     const statuses: Array<ExecutionStatus | null> = [];
     const host = makeFakeHost(wc, statuses);
-    const { api } = makeFakeApi();
+    const { api, results } = makeFakeApi();
 
     const fakeRunner = {
       run: async (params: {
@@ -411,6 +411,7 @@ test("3. Confirmed first-step NOT_FOUND triggers eligible language fallback and 
         params.onProgress?.({ kind: "step_phase", stepNumber: 1, totalSteps: total, phase: "OCR" });
         params.onProgress?.({ kind: "step_phase", stepNumber: 1, totalSteps: total, phase: "Click" });
         params.onProgress?.({ kind: "step_phase", stepNumber: 2, totalSteps: total, phase: "Type" });
+        params.onProgress?.({ kind: "step_phase", stepNumber: 2, totalSteps: total, phase: "OCR" });
         return { kind: "ok", stepsExecuted: total };
       },
     } as unknown as AuthScriptRunner;
@@ -457,6 +458,9 @@ test("3. Confirmed first-step NOT_FOUND triggers eligible language fallback and 
     const out = await executor.execute(makeClaim());
     assert.equal(out.status, "succeeded");
     assert.equal(out.selectedVariant?.language_label, "EN");
+    assert.equal(results.length, 1);
+    assert.equal(results[0].jobId, "job-reg-1");
+    assert.equal((results[0].payload as { attempt_id: string }).attempt_id, "att-reg-1");
 
     const texts = statuses.filter((s): s is ExecutionStatus => s !== null).map((s) => s.text);
     assert.deepEqual(texts, [
@@ -466,6 +470,7 @@ test("3. Confirmed first-step NOT_FOUND triggers eligible language fallback and 
       "VI → EN · Step 1/4 — OCR",
       "EN · Step 1/4 — Click",
       "EN · Step 2/4 — Type",
+      "EN · Step 2/4 — OCR",
     ]);
     assert.equal(statuses.at(-1), null, "Status cleared after job succeeds");
   } finally {
@@ -479,7 +484,7 @@ test("4. Missing or unpinned EN variant does not trigger fallback", async () => 
     const wc = makeFakeWebContents();
     const statuses: Array<ExecutionStatus | null> = [];
     const host = makeFakeHost(wc, statuses);
-    const { api } = makeFakeApi();
+    const { api, results } = makeFakeApi();
 
     let runCount = 0;
     const fakeRunner = {
@@ -615,7 +620,7 @@ test("6. Legacy script without language metadata displays Default instead of inf
     const wc = makeFakeWebContents();
     const statuses: Array<ExecutionStatus | null> = [];
     const host = makeFakeHost(wc, statuses);
-    const { api } = makeFakeApi();
+    const { api, results } = makeFakeApi();
 
     const fakeRunner = {
       run: async (params: {
@@ -952,5 +957,163 @@ test("10. OCR_CANDIDATES distinguishes outside-region and low-confidence rejecti
     assert.ok(candLog.includes("OUTSIDE_SCROLL_CONTAINER"));
   } finally {
     setLogListener(null);
+  }
+});
+
+test("11. VisualOrcExecutor confirms NOT_FOUND on DESTINATION_REACHED after scroll-search (restoring scroll) and blocks on SCROLL_STALLED", async () => {
+  // 11a: Scrolled once, then DESTINATION_REACHED -> confirmedNotFound=true, mutated=false, restoreScroll=true
+  let clearRestoredScroll = false;
+  let phaseCall = 0;
+  const wcReached = {
+    isDestroyed: () => false,
+    getURL: () => "https://maytuicanvas.com/wp-admin/post-new.php",
+    setZoomFactor: () => {},
+    getZoomFactor: () => 1,
+    debugger: {
+      isAttached: () => false,
+      attach: () => {},
+      sendCommand: async () => ({ data: TINY_PNG.toString("base64") }),
+    },
+    capturePage: async () => ({
+      toPNG: () => TINY_PNG,
+      getSize: () => ({ width: 1024, height: 560 }),
+    }),
+    executeJavaScriptInIsolatedWorld: async (_w: number, scripts: Array<{ code: string }>) => {
+      const code = scripts[0]?.code ?? "";
+      if (code.includes("delete globalThis.__creatorOcrScroll")) {
+        if (code.includes("if (true &&")) clearRestoredScroll = true;
+        return undefined;
+      }
+      phaseCall += 1;
+      if (phaseCall === 1 || phaseCall === 2 || phaseCall === 4) {
+        return {
+          moved: false,
+          reached: false,
+          reason: "SCAN_REGION",
+          containerType: "document_scrolling_element",
+          searchRegion: { x: 0, y: 0, width: 1024, height: 560 },
+          scrollTop: phaseCall >= 4 ? 200 : 0,
+          scrollHeight: 1200,
+          goal: 200,
+        };
+      }
+      if (phaseCall === 3) {
+        return {
+          moved: true,
+          reached: false,
+          reason: "SCROLLED",
+          containerType: "document_scrolling_element",
+          scrollTop: 200,
+          scrollHeight: 1200,
+          goal: 200,
+        };
+      }
+      return {
+        moved: false,
+        reached: true,
+        reason: "DESTINATION_REACHED",
+        containerType: "document_scrolling_element",
+        scrollTop: 200,
+        scrollHeight: 1200,
+        goal: 200,
+        searchRegion: { x: 0, y: 0, width: 1024, height: 560 },
+      };
+    },
+  } as unknown as WebContents;
+
+  const execReached = new VisualOrcExecutor(
+    new OrcBrowserHost(wcReached, { x: 0, y: 0, width: 1024, height: 560 }),
+    { recognize: async () => ({ text: "", segments: [], confidence: 0, language: "vie+eng" }) }
+  );
+  const outReached = await execReached.executeVisualStep({
+    payload: {
+      action: "CLICK_AND_TYPE",
+      target: {
+        asset: "assets/title.png",
+        roi: { x: 0, y: 0, width: 1024, height: 560 },
+        matchTo: "middle",
+        ocr: {
+          kind: "line",
+          text: "Thêm tiêu đề",
+          bbox: { x: 0, y: 0, width: 100, height: 20 },
+          confidence: 95,
+          confirmed: true,
+          language: "vie+eng",
+        },
+      },
+    },
+    template: TINY_PNG,
+    text: "Title",
+    stepId: "step-0",
+  });
+  assert.equal(outReached.kind, "blocked");
+  if (outReached.kind === "blocked") {
+    assert.equal(outReached.code, "NOT_FOUND");
+    assert.equal(outReached.confirmedNotFound, true);
+    assert.equal(outReached.mutated, false);
+  }
+  assert.equal(clearRestoredScroll, true, "Scroll position must be restored after non-mutating search");
+
+  // 11b: Incomplete scan (SCROLL_STALLED) -> confirmedNotFound=false
+  let stalledCall = 0;
+  const wcStalled = {
+    ...wcReached,
+    executeJavaScriptInIsolatedWorld: async (_w: number, scripts: Array<{ code: string }>) => {
+      const code = scripts[0]?.code ?? "";
+      if (code.includes("delete globalThis.__creatorOcrScroll")) return undefined;
+      stalledCall += 1;
+      if (stalledCall <= 2) {
+        return {
+          moved: false,
+          reached: false,
+          reason: "SCAN_REGION",
+          containerType: "document_scrolling_element",
+          searchRegion: { x: 0, y: 0, width: 1024, height: 560 },
+          scrollTop: 0,
+          scrollHeight: 1200,
+          goal: 400,
+        };
+      }
+      return {
+        moved: false,
+        reached: false,
+        reason: "SCROLL_STALLED",
+        containerType: "document_scrolling_element",
+        scrollTop: 0,
+        scrollHeight: 1200,
+        goal: 400,
+      };
+    },
+  } as unknown as WebContents;
+
+  const execStalled = new VisualOrcExecutor(
+    new OrcBrowserHost(wcStalled, { x: 0, y: 0, width: 1024, height: 560 }),
+    { recognize: async () => ({ text: "", segments: [], confidence: 0, language: "vie+eng" }) }
+  );
+  const outStalled = await execStalled.executeVisualStep({
+    payload: {
+      action: "CLICK_AND_TYPE",
+      target: {
+        asset: "assets/title.png",
+        roi: { x: 0, y: 0, width: 1024, height: 560 },
+        matchTo: "middle",
+        ocr: {
+          kind: "line",
+          text: "Thêm tiêu đề",
+          bbox: { x: 0, y: 0, width: 100, height: 20 },
+          confidence: 95,
+          confirmed: true,
+          language: "vie+eng",
+        },
+      },
+    },
+    template: TINY_PNG,
+    text: "Title",
+    stepId: "step-0",
+  });
+  assert.equal(outStalled.kind, "blocked");
+  if (outStalled.kind === "blocked") {
+    assert.equal(outStalled.code, "SCROLL_STALLED");
+    assert.equal(outStalled.confirmedNotFound, false);
   }
 });

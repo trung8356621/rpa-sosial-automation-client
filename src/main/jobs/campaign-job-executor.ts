@@ -643,6 +643,38 @@ export class CampaignJobExecutor {
             run.stepsExecuted === 0 &&
             run.mutated !== true;
 
+          const fallbackRejectionReason = canFallback
+            ? null
+            : !isVariantGroup
+              ? "legacy_single_script"
+              : idx + 1 >= variantsToExecute.length
+                ? "no_next_variant"
+                : !fallbackAllowedByPolicy
+                  ? "policy_disallowed"
+                  : run.kind !== "error"
+                    ? `run_kind_${run.kind}`
+                    : run.mutated === true
+                      ? "already_mutated"
+                      : run.stepIndex !== 0 || run.stepsExecuted !== 0
+                        ? "not_first_step"
+                        : run.confirmedNotFound !== true
+                          ? "not_confirmed_not_found"
+                          : "ineligible";
+
+          logClientEvent("CAMPAIGN_JOB_FALLBACK_DECISION", {
+            jobId: claim.job_id,
+            attemptId: claim.attempt_id,
+            variantId: variant?.variant_id ?? null,
+            languageLabel: variant?.language_label ?? "Default",
+            eligible: canFallback,
+            reason: canFallback ? "first_step_not_found_before_mutation" : fallbackRejectionReason,
+            confirmedNotFound: run.kind === "error" ? Boolean(run.confirmedNotFound) : false,
+            mutated: run.kind === "error" ? Boolean(run.mutated) : false,
+            stepIndex: run.kind === "error" ? (run.stepIndex ?? null) : null,
+            stepsExecuted: run.stepsExecuted,
+            failureCode: run.kind === "error" ? (run.code ?? mapped.code) : mapped.code,
+          });
+
           if (canFallback && variant) {
             const nextVariant = variantsToExecute[idx + 1].variant!;
             fallbackFromLanguage = variant.language_label;

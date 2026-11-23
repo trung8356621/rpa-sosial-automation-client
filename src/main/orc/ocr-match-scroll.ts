@@ -11,9 +11,19 @@ export type ScrollBlockReason =
 
 // Private isolated JS world: keep one container reference without modifying Facebook/WordPress DOM.
 const WORLD = 1001;
-export async function clearOcrSearch(contents: WebContents) {
+export async function clearOcrSearch(
+  contents: WebContents,
+  opts?: { restoreScroll?: boolean }
+) {
+  const restoreScroll = Boolean(opts?.restoreScroll);
   await contents.executeJavaScriptInIsolatedWorld(WORLD, [{
-    code: "delete globalThis.__creatorOcrScroll",
+    code: `(() => {
+      const s = globalThis.__creatorOcrScroll;
+      if (${restoreScroll} && s && s.el && s.el.isConnected && typeof s.initialScrollTop === 'number') {
+        s.el.scrollTo({ top: s.initialScrollTop, behavior: 'instant' });
+      }
+      delete globalThis.__creatorOcrScroll;
+    })()`,
   }]);
 }
 export async function advanceOcrSearch(
@@ -78,6 +88,7 @@ export async function advanceOcrSearch(
       const containerType = el === root ? 'document_scrolling_element' : 'modal_or_element';
       const fraction = ${JSON.stringify(matchTo)} === 'top' ? 1/3 : ${JSON.stringify(matchTo)} === 'middle' ? 2/3 : 1;
       state = globalThis.__creatorOcrScroll = { el, modal, containerType, fraction,
+        initialScrollTop: el.scrollTop,
         traveled: 0 };
     }
     const el = state.el;

@@ -235,7 +235,8 @@ export class VisualOrcExecutor {
         (() => checkWordPressRememberMeCheckbox(this.host.webContents, authorizedSiteUrl)))
       : null;
 
-    let mutated = false;
+    let actionDispatched = false;
+    let scrollMoved = false;
 
     try {
       if (inspectCheckbox) {
@@ -251,6 +252,7 @@ export class VisualOrcExecutor {
         if (checkboxStateBefore === "unchecked" && toggleCheckbox) {
           executionMethod = "verified_dom";
           selectedMatchingMethod = "verified_dom";
+          actionDispatched = true;
           await toggleCheckbox();
           await sleep(80);
           const afterCtx = await inspectCheckbox();
@@ -315,7 +317,7 @@ export class VisualOrcExecutor {
               false
             );
             if (reset.moved) {
-              mutated = true;
+              scrollMoved = true;
               await sleep(120);
               current = await this.host.capture({ light: true });
             }
@@ -409,7 +411,7 @@ export class VisualOrcExecutor {
             if (!matchTo || !(error instanceof OcrNotFound)) {
               if (error instanceof TargetNotConfident) {
                 const confirmedNotFound =
-                  !mutated &&
+                  !actionDispatched &&
                   !error.ambiguous &&
                   ((error instanceof OcrNotFound && error.outcome === "NOT_FOUND") ||
                     error.resolution?.ocrOutcome === "NOT_FOUND");
@@ -420,19 +422,28 @@ export class VisualOrcExecutor {
                   code,
                   message: error.message,
                   confirmedNotFound,
-                  mutated,
+                  mutated: actionDispatched,
                 };
               }
               throw error;
             }
             if (scrolls >= 40) {
               emitDiagnostic("scroll_limit", error.message, error.message);
+              logClientEvent("OCR_SCAN_TERMINATED", {
+                stepId: stepId ?? null,
+                scanReason: "SCROLL_LIMIT",
+                confirmedNotFound: false,
+                actionDispatched,
+                scrollMoved,
+                scrolls,
+                ocrOutcome: error.outcome,
+              });
               return {
                 kind: "blocked",
                 code: "SCROLL_LIMIT",
                 message: error.message,
                 confirmedNotFound: false,
-                mutated: true,
+                mutated: actionDispatched,
               };
             }
             const progress = await advanceOcrSearch(
@@ -441,23 +452,43 @@ export class VisualOrcExecutor {
               this.host.zoom
             );
             if (!progress.moved) {
-              emitDiagnostic(progress.reason ?? "scroll_stalled", error.message, error.message);
+              const scanReason = progress.reason ?? "SCROLL_STALLED";
+              const confirmedNotFound =
+                scanReason === "DESTINATION_REACHED" &&
+                !actionDispatched &&
+                !error.ambiguous &&
+                error.outcome === "NOT_FOUND";
+              const code = confirmedNotFound ? "NOT_FOUND" : scanReason;
+              emitDiagnostic(scanReason, error.message, error.message, "blocked");
+              logClientEvent("OCR_SCAN_TERMINATED", {
+                stepId: stepId ?? null,
+                scanReason,
+                confirmedNotFound,
+                actionDispatched,
+                scrollMoved,
+                scrolls,
+                ocrOutcome: error.outcome,
+              });
               return {
                 kind: "blocked",
-                code: progress.reason ?? "SCROLL_STALLED",
+                code,
                 message: error.message,
-                confirmedNotFound: false,
-                mutated,
+                confirmedNotFound,
+                mutated: actionDispatched,
               };
             }
-            mutated = true;
+            scrollMoved = true;
             scrolls += 1;
             await sleep(250);
             current = await this.host.capture({ light: true });
           }
         } while (true);
       } finally {
-        if (matchTo) await clearOcrSearch(this.host.webContents);
+        if (matchTo) {
+          await clearOcrSearch(this.host.webContents, {
+            restoreScroll: scrollMoved && !actionDispatched,
+          });
+        }
       }
 
       if (!match) {
@@ -466,8 +497,8 @@ export class VisualOrcExecutor {
           kind: "blocked",
           code: "NOT_FOUND",
           message: "Không resolve được target.",
-          confirmedNotFound: !mutated,
-          mutated,
+          confirmedNotFound: !actionDispatched,
+          mutated: actionDispatched,
         };
       }
 
@@ -476,7 +507,7 @@ export class VisualOrcExecutor {
         return { kind: "ok", action, x: match.x, y: match.y, method: match.method };
       }
 
-      mutated = true;
+      actionDispatched = true;
       onPhase?.("click");
       this.host.click(match.x, match.y, current.width, current.height);
       logClientEvent("ORC_CLICK", {
@@ -533,7 +564,7 @@ export class VisualOrcExecutor {
           code,
           message: err.message,
           confirmedNotFound: false,
-          mutated,
+          mutated: actionDispatched,
         };
       }
       const message = err instanceof Error ? err.message : String(err);
