@@ -792,6 +792,19 @@ export class CampaignJobExecutor {
                 : {}),
               screenshotRole: "final_success",
             });
+            if (successShot?.status === "captured") {
+              logClientEvent("ARTIFACT_CAPTURED", {
+                jobId: claim.job_id,
+                attemptId: claim.attempt_id,
+                role: "final_success",
+                sha256: successShot.sha256 ?? null,
+                sizeBytes: successShot.size_bytes ?? null,
+                variantId: variant?.variant_id ?? null,
+                languageLabel: variant?.language_label ?? null,
+                releaseId: variant?.release_id ?? null,
+                binaryUploadSupported: false,
+              });
+            }
           } catch {
             successShot = null;
           }
@@ -897,6 +910,19 @@ export class CampaignJobExecutor {
         ...(opts?.screenshotRole ? { screenshotRole: opts.screenshotRole } : {}),
         ...(opts?.failedStep !== undefined ? { failedStep: opts.failedStep } : {}),
       });
+      if (screenshotArtifact?.status === "captured") {
+        logClientEvent("ARTIFACT_CAPTURED", {
+          jobId: claim.job_id,
+          attemptId: claim.attempt_id,
+          role: opts?.screenshotRole ?? "failure",
+          sha256: screenshotArtifact.sha256 ?? null,
+          sizeBytes: screenshotArtifact.size_bytes ?? null,
+          variantId: opts?.variant?.variant_id ?? null,
+          languageLabel: opts?.variant?.language_label ?? null,
+          releaseId: opts?.variant?.release_id ?? null,
+          binaryUploadSupported: false,
+        });
+      }
     } catch (err) {
       screenshotArtifact = {
         status: "capture_failed",

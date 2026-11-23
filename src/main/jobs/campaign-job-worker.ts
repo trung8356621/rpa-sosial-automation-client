@@ -36,6 +36,9 @@ export class CampaignJobWorker {
     this.connection.onStateChange((state) => {
       const online = state.status === "connected" && state.online;
       if (online && !this.wasOnline) {
+        if (this.enabled) {
+          logClientEvent("WORKER_POLL_RESUMED", { reason: "reconnect", online: true });
+        }
         void this.tick("connect");
         this.startPeriodic();
       } else if (!online) {
@@ -48,6 +51,15 @@ export class CampaignJobWorker {
 
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
+  }
+
+  resume(reason = "resume"): void {
+    this.enabled = true;
+    if (this.connection.isOnline()) {
+      logClientEvent("WORKER_POLL_RESUMED", { reason, online: true });
+      this.startPeriodic();
+      void this.tick(reason);
+    }
   }
 
   startPeriodic(): void {
