@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import type { WebContents } from "electron";
 import { validateAuthNavigationTarget } from "../auth/auth-navigation.js";
 import type { AuthReleasePulled, AuthScriptVariable } from "../auth/auth-script-types.js";
@@ -28,7 +29,7 @@ import {
   type CampaignScriptVariant,
 } from "./contracts.js";
 import type { FailureScreenshotArtifact } from "./failure-screenshot.js";
-import { JobAttemptIdempotencyStore } from "./idempotency.js";
+import { JobAttemptIdempotencyStore, type PendingArtifactUpload } from "./idempotency.js";
 import { requireTitleBinding, resolveJobVariableBindings } from "./job-input-bindings.js";
 import { verifyWordPressDraft } from "./wordpress-draft-verify.js";
 
@@ -1002,19 +1003,73 @@ export class CampaignJobExecutor {
         screenshots = [captured];
       }
     }
+    const binaryUploadSupported = typeof this.api.uploadArtifact === "function";
+    const pendingUploads: PendingArtifactUpload[] = [];
+    const uploadedBySha = new Map<string, string>();
+    const outcomeLabel: "success" | "failed" = status === "succeeded" ? "success" : "failed";
+
+    for (const art of screenshots) {
+      if (art.status !== "captured" || !art.local_path || !art.sha256) continue;
+      const phase =
+        outcomeLabel === "success"
+          ? "final"
+          : String(art.failed_step ?? art.error_code ?? code ?? "failed");
+      const entry: PendingArtifactUpload = {
+        localPath: art.local_path,
+        sha256: art.sha256,
+        sizeBytes: art.size_bytes ?? 0,
+        mime: art.mime_type || "image/png",
+        outcome: outcomeLabel,
+        phase,
+        ...(art.failed_step !== undefined && art.failed_step !== null ? { step: art.failed_step } : {}),
+        leaseToken: claim.lease_token,
+        ...(art.variant_id ? { variantId: art.variant_id } : {}),
+        ...(art.language_label ? { languageLabel: art.language_label } : {}),
+        ...(art.package_key ? { packageKey: art.package_key } : {}),
+        ...(art.release_id !== undefined ? { releaseId: art.release_id } : {}),
+        ...(art.priority !== undefined ? { priority: art.priority } : {}),
+        ...(art.screenshot_role ? { screenshotRole: art.screenshot_role } : {}),
+        uploadStatus: "pending",
+        uploadAttempts: 0,
+      };
+
+      if (binaryUploadSupported) {
+        const upRes = await this.uploadArtifactEntry(claim.job_id, claim.attempt_id, entry);
+        if (upRes.ok) {
+          entry.uploadStatus = "uploaded";
+          entry.artifactUuid = upRes.artifactUuid;
+          uploadedBySha.set(art.sha256, upRes.artifactUuid);
+          art.artifact_uuid = upRes.artifactUuid;
+          art.upload_status = "uploaded";
+        } else {
+          entry.uploadStatus = "failed";
+          entry.uploadAttempts = 1;
+          entry.lastUploadStatus = upRes.status;
+          entry.lastUploadErrors = upRes.errors;
+          entry.lastUploadMessage = upRes.message;
+          entry.uploadStopped = upRes.permanent;
+          entry.nextRetryAt = upRes.permanent ? undefined : Date.now() + 15_000;
+          art.upload_status = "failed";
+        }
+      }
+      pendingUploads.push(entry);
+    }
+
     const primaryScreenshot = screenshots.length > 0 ? screenshots[screenshots.length - 1] : null;
     const artifactPayloads = screenshots.map((art) => {
-      const outcome = status === "succeeded" ? "success" : "failed";
+      const outcome = outcomeLabel;
       const phase =
         outcome === "success"
           ? "final"
           : String(art.failed_step ?? art.error_code ?? code ?? "failed");
+      const artifactUuid = art.sha256 ? uploadedBySha.get(art.sha256) : undefined;
       return {
         ...art,
         kind: "screenshot",
         mime: art.mime_type || "image/png",
         size_bytes: art.size_bytes ?? 0,
         ...(art.sha256 ? { checksum: art.sha256 } : {}),
+        ...(artifactUuid ? { artifact_uuid: artifactUuid } : {}),
         outcome,
         metadata: {
           phase,
@@ -1028,9 +1083,13 @@ export class CampaignJobExecutor {
           ...(art.screenshot_role ? { screenshot_role: art.screenshot_role } : {}),
           ...(art.failed_step !== undefined ? { failed_step: art.failed_step } : {}),
         },
-        binary_upload_supported: false,
-        upload_note:
-          "Backend /client/jobs/{jobId}/result accepts artifact metadata only; no binary screenshot upload endpoint exists.",
+        binary_upload_supported: binaryUploadSupported,
+        ...(binaryUploadSupported
+          ? { upload_status: artifactUuid ? "uploaded" : "failed" }
+          : {
+              upload_note:
+                "Backend /client/jobs/{jobId}/result accepts artifact metadata only; no binary screenshot upload endpoint exists.",
+            }),
       };
     });
 
@@ -1065,9 +1124,25 @@ export class CampaignJobExecutor {
       payload: body,
       localScreenshotArtifact: primaryScreenshot,
       ...(screenshots.length > 0 ? { localScreenshotArtifacts: screenshots } : {}),
+      ...(pendingUploads.length > 0 ? { pendingArtifactUploads: pendingUploads } : {}),
     });
 
     const delivery = await this.deliverPendingResult(claim.job_id, claim.attempt_id);
+    const capturedUploads = pendingUploads.length;
+    const uploadedCount = pendingUploads.filter((u) => u.uploadStatus === "uploaded").length;
+    const terminalUploadStatus = !primaryScreenshot
+      ? null
+      : binaryUploadSupported && capturedUploads > 0
+        ? uploadedCount === capturedUploads
+          ? "uploaded"
+          : uploadedCount > 0
+            ? "partial"
+            : "failed"
+        : delivery.ok
+          ? delivery.usedFallback
+            ? "retained_local_only"
+            : "metadata_reported"
+          : "failed";
     logClientEvent("CAMPAIGN_JOB_TERMINAL", {
       jobId: claim.job_id,
       attemptId: claim.attempt_id,
@@ -1080,13 +1155,7 @@ export class CampaignJobExecutor {
       draftVerified: extra.draftVerified ?? false,
       screenshotCaptureStatus: primaryScreenshot?.status ?? null,
       screenshotCount: screenshots.length,
-      screenshotUploadStatus: primaryScreenshot
-        ? delivery.ok
-          ? delivery.usedFallback
-            ? "retained_local_only"
-            : "metadata_reported"
-          : "failed"
-        : null,
+      screenshotUploadStatus: terminalUploadStatus,
     });
     return {
       reported: delivery.ok,
@@ -1117,7 +1186,160 @@ export class CampaignJobExecutor {
       const res = await this.deliverPendingResult(rec.jobId, rec.attemptId);
       if (res.ok) delivered += 1;
     }
+    if (typeof this.api.uploadArtifact === "function") {
+      const pendingArtifacts = this.idempotency.listPendingArtifactUploads();
+      for (const rec of pendingArtifacts) {
+        for (const entry of rec.pendingArtifactUploads ?? []) {
+          if (entry.uploadStatus === "uploaded" || entry.uploadStopped) continue;
+          if (entry.nextRetryAt && Date.now() < entry.nextRetryAt) continue;
+          const res = await this.uploadArtifactEntry(rec.jobId, rec.attemptId, entry);
+          if (res.ok) {
+            this.idempotency.recordArtifactUploadSuccess(
+              rec.jobId,
+              rec.attemptId,
+              entry.sha256,
+              res.artifactUuid
+            );
+          } else {
+            const nextAttempts = entry.uploadAttempts + 1;
+            const permanent = res.permanent || nextAttempts >= 10;
+            const backoffMs = Math.min(300_000, 15_000 * 2 ** Math.min(6, entry.uploadAttempts));
+            this.idempotency.recordArtifactUploadFailure(rec.jobId, rec.attemptId, entry.sha256, {
+              status: res.status,
+              errors: res.errors,
+              message: res.message,
+              permanent,
+              nextRetryAt: permanent ? undefined : Date.now() + backoffMs,
+            });
+          }
+        }
+      }
+    }
     return delivered;
+  }
+
+  private async uploadArtifactEntry(
+    jobId: string,
+    attemptId: string,
+    entry: PendingArtifactUpload
+  ): Promise<
+    | { ok: true; artifactUuid: string; idempotent: boolean }
+    | { ok: false; status: number; errors: string[]; message: string; permanent: boolean }
+  > {
+    const MAX_ARTIFACT_BYTES = 10 * 1024 * 1024;
+    if (entry.mime !== "image/png") {
+      return {
+        ok: false,
+        status: 422,
+        errors: ["unsupported_mime"],
+        message: `Unsupported artifact mime: ${entry.mime}`,
+        permanent: true,
+      };
+    }
+
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(entry.localPath);
+    } catch (err) {
+      return {
+        ok: false,
+        status: 0,
+        errors: ["local_artifact_missing"],
+        message: err instanceof Error ? err.message : "Local screenshot file missing.",
+        permanent: true,
+      };
+    }
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_ARTIFACT_BYTES) {
+      return {
+        ok: false,
+        status: 422,
+        errors: ["artifact_size_out_of_bounds"],
+        message: `Screenshot size ${bytes.byteLength} exceeds allowed limit.`,
+        permanent: true,
+      };
+    }
+
+    logClientEvent("ARTIFACT_UPLOAD_STARTED", {
+      jobId,
+      attemptId,
+      role: entry.screenshotRole ?? null,
+      variantId: entry.variantId ?? null,
+      languageLabel: entry.languageLabel ?? null,
+      releaseId: entry.releaseId ?? null,
+      sha256: entry.sha256,
+      sizeBytes: bytes.byteLength,
+    });
+
+    const res = await this.api.uploadArtifact(jobId, {
+      attempt_uuid: attemptId,
+      ...(entry.leaseToken ? { lease_token: entry.leaseToken } : {}),
+      kind: "screenshot",
+      mime: entry.mime,
+      outcome: entry.outcome,
+      phase: entry.phase,
+      content_base64: bytes.toString("base64"),
+      checksum_sha256: entry.sha256,
+      ...(entry.variantId ? { variant_id: entry.variantId } : {}),
+      ...(entry.languageLabel ? { language_label: entry.languageLabel } : {}),
+      ...(entry.packageKey ? { package_key: entry.packageKey } : {}),
+      ...(entry.releaseId !== undefined ? { release_id: entry.releaseId } : {}),
+      ...(entry.priority !== undefined ? { priority: entry.priority } : {}),
+      ...(entry.screenshotRole ? { screenshot_role: entry.screenshotRole } : {}),
+      ...(entry.step !== undefined ? { step: entry.step } : {}),
+    });
+
+    if (res.ok) {
+      logClientEvent("ARTIFACT_UPLOAD_ACKED", {
+        jobId,
+        attemptId,
+        role: entry.screenshotRole ?? null,
+        variantId: entry.variantId ?? null,
+        languageLabel: entry.languageLabel ?? null,
+        releaseId: entry.releaseId ?? null,
+        sha256: entry.sha256,
+        sizeBytes: bytes.byteLength,
+        artifactUuid: res.data.artifact_uuid,
+        idempotent: Boolean(res.idempotent),
+        status: "uploaded",
+      });
+      return {
+        ok: true,
+        artifactUuid: res.data.artifact_uuid,
+        idempotent: Boolean(res.idempotent),
+      };
+    }
+
+    const permanent =
+      res.status === 401 ||
+      res.status === 403 ||
+      res.status === 404 ||
+      res.status === 409 ||
+      res.status === 422 ||
+      res.errors.some((e) => /stale|fence|expired|unauthorized|forbidden/i.test(e));
+
+    logClientError("ARTIFACT_UPLOAD_FAILED", {
+      jobId,
+      attemptId,
+      role: entry.screenshotRole ?? null,
+      variantId: entry.variantId ?? null,
+      languageLabel: entry.languageLabel ?? null,
+      releaseId: entry.releaseId ?? null,
+      sha256: entry.sha256,
+      sizeBytes: bytes.byteLength,
+      httpStatus: res.status,
+      errors: res.errors,
+      message: res.message,
+      permanent,
+      status: "failed",
+    });
+
+    return {
+      ok: false,
+      status: res.status,
+      errors: res.errors,
+      message: res.message,
+      permanent,
+    };
   }
 
   private async deliverPendingResult(

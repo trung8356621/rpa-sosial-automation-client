@@ -108,6 +108,29 @@ export type CampaignJobResultRequest = {
   artifacts?: Array<Record<string, unknown>>;
 };
 
+export type CampaignJobArtifactUploadRequest = {
+  attempt_uuid: string;
+  lease_token?: string;
+  kind: "screenshot";
+  mime: string;
+  outcome: "success" | "failed";
+  phase: string;
+  content_base64: string;
+  checksum_sha256?: string;
+  variant_id?: string;
+  language_label?: string;
+  package_key?: string;
+  release_id?: number;
+  priority?: number;
+  screenshot_role?: string;
+  step?: string | number;
+};
+
+export type CampaignJobArtifactUploadResponse = {
+  artifact_uuid: string;
+  checksum_sha256: string | null;
+};
+
 export type CampaignJobApiResult<T> =
   | { ok: true; data: T; idempotent?: boolean }
   | { ok: false; status: number; errors: string[]; message: string };

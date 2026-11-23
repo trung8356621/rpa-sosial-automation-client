@@ -34,6 +34,8 @@ export type FailureScreenshotArtifact = {
   priority?: number;
   screenshot_role?: string;
   failed_step?: number | string | null;
+  artifact_uuid?: string;
+  upload_status?: "pending" | "uploaded" | "failed";
 };
 
 export type SensitiveRect = {

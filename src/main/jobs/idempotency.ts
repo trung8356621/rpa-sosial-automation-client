@@ -8,6 +8,33 @@ export type AttemptLifecycleState =
   | "terminal_pending_delivery"
   | "terminal_acknowledged";
 
+export type ArtifactUploadStatus = "pending" | "uploaded" | "failed";
+
+export type PendingArtifactUpload = {
+  localPath: string;
+  sha256: string;
+  sizeBytes: number;
+  mime: string;
+  outcome: "success" | "failed";
+  phase: string;
+  step?: string | number;
+  leaseToken?: string;
+  variantId?: string;
+  languageLabel?: string;
+  packageKey?: string;
+  releaseId?: number;
+  priority?: number;
+  screenshotRole?: string;
+  uploadStatus: ArtifactUploadStatus;
+  artifactUuid?: string;
+  uploadAttempts: number;
+  nextRetryAt?: number;
+  lastUploadStatus?: number;
+  lastUploadErrors?: string[];
+  lastUploadMessage?: string;
+  uploadStopped?: boolean;
+};
+
 export type PersistedAttemptRecord = {
   jobId: string;
   attemptId: string;
@@ -22,6 +49,7 @@ export type PersistedAttemptRecord = {
   pendingPayload?: CampaignJobResultRequest;
   localScreenshotArtifact?: FailureScreenshotArtifact | null;
   localScreenshotArtifacts?: FailureScreenshotArtifact[];
+  pendingArtifactUploads?: PendingArtifactUpload[];
   deliveryAttempts: number;
   nextRetryAt?: number;
   lastDeliveryStatus?: number;
@@ -92,6 +120,7 @@ export class JobAttemptIdempotencyStore {
       payload: CampaignJobResultRequest;
       localScreenshotArtifact?: FailureScreenshotArtifact | null;
       localScreenshotArtifacts?: FailureScreenshotArtifact[];
+      pendingArtifactUploads?: PendingArtifactUpload[];
     }
   ): PersistedAttemptRecord {
     const now = new Date().toISOString();
@@ -115,6 +144,11 @@ export class JobAttemptIdempotencyStore {
         ? { localScreenshotArtifacts: params.localScreenshotArtifacts }
         : prev?.localScreenshotArtifacts !== undefined
           ? { localScreenshotArtifacts: prev.localScreenshotArtifacts }
+          : {}),
+      ...(params.pendingArtifactUploads !== undefined
+        ? { pendingArtifactUploads: params.pendingArtifactUploads }
+        : prev?.pendingArtifactUploads !== undefined
+          ? { pendingArtifactUploads: prev.pendingArtifactUploads }
           : {}),
       deliveryAttempts: prev?.deliveryAttempts ?? 0,
       deliveryStopped: false,
@@ -226,6 +260,106 @@ export class JobAttemptIdempotencyStore {
       out.push(rec);
     }
     return out;
+  }
+
+  listPendingArtifactUploads(now = Date.now()): PersistedAttemptRecord[] {
+    const out: PersistedAttemptRecord[] = [];
+    for (const rec of this.records.values()) {
+      const uploads = rec.pendingArtifactUploads;
+      if (!uploads?.length) continue;
+      const hasRetryable = uploads.some(
+        (u) =>
+          u.uploadStatus !== "uploaded" &&
+          !u.uploadStopped &&
+          (!u.nextRetryAt || now >= u.nextRetryAt)
+      );
+      if (hasRetryable) {
+        out.push(rec);
+      }
+    }
+    return out;
+  }
+
+  recordArtifactUploadSuccess(
+    jobId: string,
+    attemptId: string,
+    sha256: string,
+    artifactUuid: string
+  ): PersistedAttemptRecord | null {
+    const k = this.key(jobId, attemptId);
+    const prev = this.records.get(k);
+    if (!prev?.pendingArtifactUploads) return null;
+    const uploads = prev.pendingArtifactUploads.map((u) =>
+      u.sha256 === sha256
+        ? {
+            ...u,
+            uploadStatus: "uploaded" as const,
+            artifactUuid,
+            nextRetryAt: undefined,
+            lastUploadStatus: 200,
+            lastUploadErrors: undefined,
+            lastUploadMessage: undefined,
+            uploadStopped: false,
+          }
+        : u
+    );
+    const patchArtifact = (art?: FailureScreenshotArtifact | null) =>
+      art && art.sha256 === sha256
+        ? { ...art, artifact_uuid: artifactUuid, upload_status: "uploaded" as const }
+        : art;
+    const rec: PersistedAttemptRecord = {
+      ...prev,
+      pendingArtifactUploads: uploads,
+      localScreenshotArtifact: patchArtifact(prev.localScreenshotArtifact) ?? null,
+      ...(prev.localScreenshotArtifacts
+        ? {
+            localScreenshotArtifacts: prev.localScreenshotArtifacts.map(
+              (a) => patchArtifact(a)!
+            ),
+          }
+        : {}),
+    };
+    this.records.set(k, rec);
+    this.persist();
+    return rec;
+  }
+
+  recordArtifactUploadFailure(
+    jobId: string,
+    attemptId: string,
+    sha256: string,
+    failure: {
+      status: number;
+      errors: string[];
+      message: string;
+      permanent: boolean;
+      nextRetryAt?: number;
+    }
+  ): PersistedAttemptRecord | null {
+    const k = this.key(jobId, attemptId);
+    const prev = this.records.get(k);
+    if (!prev?.pendingArtifactUploads) return null;
+    const uploads = prev.pendingArtifactUploads.map((u) =>
+      u.sha256 === sha256
+        ? {
+            ...u,
+            uploadStatus: "failed" as const,
+            uploadAttempts: u.uploadAttempts + 1,
+            lastUploadStatus: failure.status,
+            lastUploadErrors: failure.errors,
+            lastUploadMessage: failure.message,
+            nextRetryAt: failure.permanent ? undefined : failure.nextRetryAt,
+            uploadStopped: failure.permanent,
+          }
+        : u
+    );
+    const rec: PersistedAttemptRecord = {
+      ...prev,
+      pendingArtifactUploads: uploads,
+    };
+    this.records.set(k, rec);
+    this.persist();
+    return rec;
   }
 
   clear(): void {
