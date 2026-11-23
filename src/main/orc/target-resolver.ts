@@ -87,6 +87,179 @@ function withClickOffset(
   const point = applyOcrClickOffset(match.x, match.y, target.clickOffset);
   return { ...match, x: point.x, y: point.y };
 }
+async function resolveOcrInViewport(
+  frame: Buffer,
+  template: Buffer,
+  payload: Payload,
+  ocr: OcrEngine,
+  searchRegion?: Rect,
+  onOcr?: (event: { phase: "start" | "result"; offset: Rect; result?: OcrResult }) => void,
+  onImage?: (event: ImageSearchTrace) => void,
+  existingTrace?: ResolutionTrace,
+): Promise<NonNullable<Result["match"]> & { resolution: ResolutionTrace }> {
+  const target = payload.target!;
+  const ocrSelection = target.ocr!;
+  const size = await sharp(frame).metadata();
+  let result: OcrResult;
+  const offset = { x: 0, y: 0, width: size.width!, height: size.height! };
+  onOcr?.({ phase: "start", offset });
+  try { result = await ocr.recognize(frame); onOcr?.({ phase: "result", offset, result }); }
+  catch (error) { throw new OcrTechnicalError(error); }
+  const withinRegion = (box: Rect) => !searchRegion ||
+    (box.x+box.width/2 >= searchRegion.x && box.x+box.width/2 <= searchRegion.x+searchRegion.width &&
+     box.y+box.height/2 >= searchRegion.y && box.y+box.height/2 <= searchRegion.y+searchRegion.height);
+  const trace: ResolutionTrace = existingTrace
+    ? { ...existingTrace, attempts: [...existingTrace.attempts], context: [...(existingTrace.context ?? [])] }
+    : { mode: "auto", attempts: [], context: [] };
+  const allCandidates = findOcrCandidates(result, ocrSelection);
+  const candidates = allCandidates.filter(candidate => withinRegion(candidate.bbox));
+  const outsideRegionCount = allCandidates.length - candidates.length;
+  for (const candidate of allCandidates.filter(candidate => !withinRegion(candidate.bbox)))
+    trace.attempts.push({ method: "ocr", outcome: "not_confident", confidence: candidate.confidence,
+      reason: "OUTSIDE_SCROLL_CONTAINER", x: candidate.bbox.x+candidate.bbox.width/2, y: candidate.bbox.y+candidate.bbox.height/2 });
+  // Preserve complete line/word evidence until candidates have been assembled.
+  // Context can use all text visible inside the container, including at its edges.
+  const contextOcr = { ...result, segments: result.segments.filter(segment => withinRegion(segment.bbox)) };
+  if (!candidates.length) {
+    logClientEvent("OCR_CANDIDATES", {
+      totalSegments: result.segments.length,
+      matchedCandidates: allCandidates.length,
+      inRegionCandidates: 0,
+      outsideRegionCount,
+      lowConfidenceCount: 0,
+      confidentCount: 0,
+      confirmedCount: 0,
+      rejectionReasons: [outsideRegionCount > 0 ? "OUTSIDE_SCROLL_CONTAINER" : "NO_CANDIDATE"],
+    });
+    throw new OcrNotFound(trace);
+  }
+  if (candidates.length > 32) {
+    logClientEvent("OCR_CANDIDATES", {
+      totalSegments: result.segments.length,
+      matchedCandidates: allCandidates.length,
+      inRegionCandidates: candidates.length,
+      outsideRegionCount,
+      lowConfidenceCount: 0,
+      confidentCount: 0,
+      confirmedCount: 0,
+      rejectionReasons: ["CONTEXT_AMBIGUOUS_TOO_MANY"],
+    });
+    throw new TargetNotConfident("CONTEXT_AMBIGUOUS: quá nhiều dòng chữ trùng trong viewport; không click.", trace, true);
+  }
+  const confirmed: NonNullable<Result["match"]>[] = [];
+  const confident: NonNullable<Result["match"]>[] = [];
+  let lowConfidenceCount = 0;
+  for (const candidate of candidates) {
+    let found: NonNullable<Result["match"]>;
+    try {
+      found = resolveOcrText({ ...result, segments: [candidate] }, ocrSelection,
+        { x: 0, y: 0, width: size.width!, height: size.height! });
+    } catch (error) {
+      if (!(error instanceof TargetNotConfident) || !error.message.startsWith("OCR_LOW_CONFIDENCE")) throw error;
+      lowConfidenceCount += 1;
+      trace.attempts.push({ method: "ocr", outcome: "not_confident", reason: (error as Error).message,
+        x: candidate.bbox.x+candidate.bbox.width/2, y: candidate.bbox.y+candidate.bbox.height/2, confidence: candidate.confidence });
+      continue;
+    }
+    confident.push(found);
+    trace.attempts.push({ method: "ocr", outcome: "matched", x: found.x, y: found.y, confidence: found.confidence });
+    let context: NonNullable<ResolutionTrace["context"]>[number];
+    try { context = await confirmOcrContext(frame, template, payload, ocr, found, contextOcr, candidate.bbox, searchRegion); }
+    catch (error) { throw new OcrTechnicalError(error); }
+    trace.context!.push(context);
+    if (context.confirmed) confirmed.push(found);
+  }
+  const rejectionReasons: string[] = [];
+  if (outsideRegionCount > 0) rejectionReasons.push("OUTSIDE_SCROLL_CONTAINER");
+  if (lowConfidenceCount > 0) rejectionReasons.push("OCR_LOW_CONFIDENCE");
+  if (confirmed.length > 1 || (confirmed.length === 0 && confident.length > 1)) {
+    rejectionReasons.push("CONTEXT_AMBIGUOUS");
+  }
+  logClientEvent("OCR_CANDIDATES", {
+    totalSegments: result.segments.length,
+    matchedCandidates: allCandidates.length,
+    inRegionCandidates: candidates.length,
+    outsideRegionCount,
+    lowConfidenceCount,
+    confidentCount: confident.length,
+    confirmedCount: confirmed.length,
+    rejectionReasons,
+  });
+  if (confirmed.length > 1) throw new TargetNotConfident("CONTEXT_AMBIGUOUS: nhiều mục tiêu cùng chữ/ngữ cảnh; không click.", trace, true);
+  if (confirmed.length === 1) {
+    trace.selectedMethod = "ocr";
+    return { ...withClickOffset(confirmed[0], target), resolution: trace };
+  }
+  // Context is a discriminator, not a second mandatory match. A single exact,
+  // confident OCR target is safe; duplicated targets still require context.
+  if (confident.length === 1) {
+    trace.selectedMethod = "ocr";
+    return { ...withClickOffset(confident[0], target), resolution: trace };
+  }
+  if (confident.length > 1)
+    throw new TargetNotConfident("CONTEXT_AMBIGUOUS: nhiều mục tiêu cùng chữ nhưng context không phân biệt được; không click.", trace, true);
+
+  // OCR candidates existed but all failed MIN_OCR_CONFIDENCE (< 80):
+  // attempt strict template match (>= 0.96, non-ambiguous) when a valid template asset exists.
+  if (template.length > 0 && target.roi?.width > 0 && target.roi?.height > 0) {
+    const threshold = Math.max(0.96, payload.threshold ?? 0.96);
+    try {
+      const image = await matchTemplate(frame, template, target.roi, {
+        expand: true,
+        threshold,
+        onSearch: onImage,
+      });
+      const inRegion =
+        !searchRegion ||
+        (image.x >= searchRegion.x &&
+          image.x <= searchRegion.x + searchRegion.width &&
+          image.y >= searchRegion.y &&
+          image.y <= searchRegion.y + searchRegion.height);
+      trace.attempts.push({
+        method: "image",
+        outcome: image.ambiguous
+          ? "ambiguous"
+          : image.score >= threshold && inRegion
+            ? "matched"
+            : "not_confident",
+        score: image.score,
+        x: image.x,
+        y: image.y,
+        reason: image.ambiguous
+          ? "Ảnh có nhiều vị trí gần giống nhau."
+          : !inRegion
+            ? "Template match nằm ngoài vùng scroll."
+            : image.score < threshold
+              ? `Image score ${image.score.toFixed(4)} < ${threshold}.`
+              : "Strict template fallback matched.",
+      });
+      if (image.ambiguous) {
+        trace.blockedReason = "Target ảnh có nhiều vị trí; không click đoán.";
+        throw new TargetNotConfident(trace.blockedReason, trace, true);
+      }
+      if (image.score >= threshold && inRegion) {
+        trace.selectedMethod = "image";
+        trace.fallbackReason = "OCR_LOW_CONFIDENCE_TEMPLATE_FALLBACK";
+        return {
+          method: "image",
+          score: image.score,
+          x: image.x,
+          y: image.y,
+          resolution: trace,
+        };
+      }
+      trace.fallbackReason = `Image score ${image.score.toFixed(4)} < ${threshold}`;
+    } catch (err) {
+      if (err instanceof TargetNotConfident) throw err;
+      const msg = err instanceof Error ? err.message : String(err);
+      trace.attempts.push({ method: "image", outcome: "failed", reason: msg });
+      trace.fallbackReason = msg;
+    }
+  }
+
+  throw new OcrNotFound(trace, "OCR_LOW_CONFIDENCE");
+}
+
 export async function resolveVisualTarget(
   frame: Buffer,
   template: Buffer,
@@ -99,163 +272,7 @@ export async function resolveVisualTarget(
   const target = payload.target!;
   // Match To explicitly searches the visible OCR region after bounded scrolling.
   if (target.ocr?.confirmed && effectiveMatchTo(payload) !== "none") {
-    const size = await sharp(frame).metadata();
-    let result: OcrResult;
-    const offset = { x: 0, y: 0, width: size.width!, height: size.height! };
-    onOcr?.({ phase: "start", offset });
-    try { result = await ocr.recognize(frame); onOcr?.({ phase: "result", offset, result }); }
-    catch (error) { throw new OcrTechnicalError(error); }
-    const withinRegion = (box: Rect) => !searchRegion ||
-      (box.x+box.width/2 >= searchRegion.x && box.x+box.width/2 <= searchRegion.x+searchRegion.width &&
-       box.y+box.height/2 >= searchRegion.y && box.y+box.height/2 <= searchRegion.y+searchRegion.height);
-    const trace: ResolutionTrace = { mode: "auto", attempts: [], context: [] };
-    const allCandidates = findOcrCandidates(result, target.ocr);
-    const candidates = allCandidates.filter(candidate => withinRegion(candidate.bbox));
-    const outsideRegionCount = allCandidates.length - candidates.length;
-    for (const candidate of allCandidates.filter(candidate => !withinRegion(candidate.bbox)))
-      trace.attempts.push({ method: "ocr", outcome: "not_confident", confidence: candidate.confidence,
-        reason: "OUTSIDE_SCROLL_CONTAINER", x: candidate.bbox.x+candidate.bbox.width/2, y: candidate.bbox.y+candidate.bbox.height/2 });
-    // Preserve complete line/word evidence until candidates have been assembled.
-    // Context can use all text visible inside the container, including at its edges.
-    const contextOcr = { ...result, segments: result.segments.filter(segment => withinRegion(segment.bbox)) };
-    if (!candidates.length) {
-      logClientEvent("OCR_CANDIDATES", {
-        totalSegments: result.segments.length,
-        matchedCandidates: allCandidates.length,
-        inRegionCandidates: 0,
-        outsideRegionCount,
-        lowConfidenceCount: 0,
-        confidentCount: 0,
-        confirmedCount: 0,
-        rejectionReasons: [outsideRegionCount > 0 ? "OUTSIDE_SCROLL_CONTAINER" : "NO_CANDIDATE"],
-      });
-      throw new OcrNotFound(trace);
-    }
-    if (candidates.length > 32) {
-      logClientEvent("OCR_CANDIDATES", {
-        totalSegments: result.segments.length,
-        matchedCandidates: allCandidates.length,
-        inRegionCandidates: candidates.length,
-        outsideRegionCount,
-        lowConfidenceCount: 0,
-        confidentCount: 0,
-        confirmedCount: 0,
-        rejectionReasons: ["CONTEXT_AMBIGUOUS_TOO_MANY"],
-      });
-      throw new TargetNotConfident("CONTEXT_AMBIGUOUS: quá nhiều dòng chữ trùng trong viewport; không click.", trace, true);
-    }
-    const confirmed: NonNullable<Result["match"]>[] = [];
-    const confident: NonNullable<Result["match"]>[] = [];
-    let lowConfidenceCount = 0;
-    for (const candidate of candidates) {
-      let found: NonNullable<Result["match"]>;
-      try {
-        found = resolveOcrText({ ...result, segments: [candidate] }, target.ocr,
-          { x: 0, y: 0, width: size.width!, height: size.height! });
-      } catch (error) {
-        if (!(error instanceof TargetNotConfident) || !error.message.startsWith("OCR_LOW_CONFIDENCE")) throw error;
-        lowConfidenceCount += 1;
-        trace.attempts.push({ method: "ocr", outcome: "not_confident", reason: (error as Error).message,
-          x: candidate.bbox.x+candidate.bbox.width/2, y: candidate.bbox.y+candidate.bbox.height/2, confidence: candidate.confidence });
-        continue;
-      }
-      confident.push(found);
-      trace.attempts.push({ method: "ocr", outcome: "matched", x: found.x, y: found.y, confidence: found.confidence });
-      let context: NonNullable<ResolutionTrace["context"]>[number];
-      try { context = await confirmOcrContext(frame, template, payload, ocr, found, contextOcr, candidate.bbox, searchRegion); }
-      catch (error) { throw new OcrTechnicalError(error); }
-      trace.context!.push(context);
-      if (context.confirmed) confirmed.push(found);
-    }
-    const rejectionReasons: string[] = [];
-    if (outsideRegionCount > 0) rejectionReasons.push("OUTSIDE_SCROLL_CONTAINER");
-    if (lowConfidenceCount > 0) rejectionReasons.push("OCR_LOW_CONFIDENCE");
-    if (confirmed.length > 1 || (confirmed.length === 0 && confident.length > 1)) {
-      rejectionReasons.push("CONTEXT_AMBIGUOUS");
-    }
-    logClientEvent("OCR_CANDIDATES", {
-      totalSegments: result.segments.length,
-      matchedCandidates: allCandidates.length,
-      inRegionCandidates: candidates.length,
-      outsideRegionCount,
-      lowConfidenceCount,
-      confidentCount: confident.length,
-      confirmedCount: confirmed.length,
-      rejectionReasons,
-    });
-    if (confirmed.length > 1) throw new TargetNotConfident("CONTEXT_AMBIGUOUS: nhiều mục tiêu cùng chữ/ngữ cảnh; không click.", trace, true);
-    if (confirmed.length === 1) {
-      trace.selectedMethod = "ocr";
-      return { ...withClickOffset(confirmed[0], target), resolution: trace };
-    }
-    // Context is a discriminator, not a second mandatory match. A single exact,
-    // confident OCR target is safe; duplicated targets still require context.
-    if (confident.length === 1) {
-      trace.selectedMethod = "ocr";
-      return { ...withClickOffset(confident[0], target), resolution: trace };
-    }
-    if (confident.length > 1)
-      throw new TargetNotConfident("CONTEXT_AMBIGUOUS: nhiều mục tiêu cùng chữ nhưng context không phân biệt được; không click.", trace, true);
-
-    // OCR candidates existed but all failed MIN_OCR_CONFIDENCE (< 80):
-    // attempt strict template match (>= 0.96, non-ambiguous) when a valid template asset exists.
-    if (template.length > 0 && target.roi?.width > 0 && target.roi?.height > 0) {
-      const threshold = Math.max(0.96, payload.threshold ?? 0.96);
-      try {
-        const image = await matchTemplate(frame, template, target.roi, {
-          expand: true,
-          threshold,
-          onSearch: onImage,
-        });
-        const inRegion =
-          !searchRegion ||
-          (image.x >= searchRegion.x &&
-            image.x <= searchRegion.x + searchRegion.width &&
-            image.y >= searchRegion.y &&
-            image.y <= searchRegion.y + searchRegion.height);
-        trace.attempts.push({
-          method: "image",
-          outcome: image.ambiguous
-            ? "ambiguous"
-            : image.score >= threshold && inRegion
-              ? "matched"
-              : "not_confident",
-          score: image.score,
-          x: image.x,
-          y: image.y,
-          reason: image.ambiguous
-            ? "Ảnh có nhiều vị trí gần giống nhau."
-            : !inRegion
-              ? "Template match nằm ngoài vùng scroll."
-              : image.score < threshold
-                ? `Image score ${image.score.toFixed(4)} < ${threshold}.`
-                : "Strict template fallback matched.",
-        });
-        if (image.ambiguous) {
-          trace.blockedReason = "Target ảnh có nhiều vị trí; không click đoán.";
-          throw new TargetNotConfident(trace.blockedReason, trace, true);
-        }
-        if (image.score >= threshold && inRegion) {
-          trace.selectedMethod = "image";
-          trace.fallbackReason = "OCR_LOW_CONFIDENCE_TEMPLATE_FALLBACK";
-          return {
-            method: "image",
-            score: image.score,
-            x: image.x,
-            y: image.y,
-            resolution: trace,
-          };
-        }
-        trace.fallbackReason = `Image score ${image.score.toFixed(4)} < ${threshold}`;
-      } catch (err) {
-        if (err instanceof TargetNotConfident) throw err;
-        const msg = err instanceof Error ? err.message : String(err);
-        trace.attempts.push({ method: "image", outcome: "failed", reason: msg });
-        trace.fallbackReason = msg;
-      }
-    }
-
-    throw new OcrNotFound(trace, "OCR_LOW_CONFIDENCE");
+    return resolveOcrInViewport(frame, template, payload, ocr, searchRegion, onOcr, onImage);
   }
   const trace: ResolutionTrace = {
     mode: "auto",
@@ -420,6 +437,15 @@ export async function resolveVisualTarget(
     return { ...withClickOffset(textMatch, target), resolution: trace };
   }
   if (ocrRejection) {
+    // When matchTo=none, local ROI (±64px) can miss a target shifted within the same
+    // visible viewport (e.g. by dynamic admin banners). Fall back to full-viewport OCR.
+    if (
+      target.ocr?.confirmed &&
+      ocrRejection instanceof OcrNotFound &&
+      ocrRejection.outcome === "NOT_FOUND"
+    ) {
+      return resolveOcrInViewport(frame, template, payload, ocr, searchRegion, onOcr, onImage, trace);
+    }
     trace.blockedReason = ocrRejection.message;
     throw new TargetNotConfident(ocrRejection.message, trace, ocrRejection.ambiguous);
   }
