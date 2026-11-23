@@ -1,8 +1,15 @@
 import type { Rect } from "./contracts.js";
 import type { WebContents } from "electron";
 import { TargetNotConfident } from "./target-resolver.js";
+import { logClientEvent } from "../main-error-log.js";
 
-// Private isolated JS world: keep one container reference without modifying Facebook DOM.
+export type ScrollBlockReason =
+  | "MODAL_CHANGED"
+  | "SCROLL_ELEMENT_DISCONNECTED"
+  | "SCROLL_ELEMENT_NOT_VISIBLE"
+  | "SCROLL_CONTAINER_UNAVAILABLE";
+
+// Private isolated JS world: keep one container reference without modifying Facebook/WordPress DOM.
 const WORLD = 1001;
 export async function clearOcrSearch(contents: WebContents) {
   await contents.executeJavaScriptInIsolatedWorld(WORLD, [{
@@ -15,6 +22,8 @@ export async function advanceOcrSearch(
   moved: boolean;
   reached: boolean;
   reason?: string;
+  blockReason?: ScrollBlockReason;
+  containerType?: "document_scrolling_element" | "modal_or_element";
   searchRegion?: Rect;
   deltaYDip?: number;
   scrollTop?: number;
@@ -26,6 +35,17 @@ export async function advanceOcrSearch(
       const r = el.getBoundingClientRect(), style = getComputedStyle(el);
       return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight &&
         r.right > 0 && r.left < innerWidth && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const isScrollTargetVisible = el => {
+      if (!el || !el.isConnected) return false;
+      const style = getComputedStyle(el);
+      if (style.visibility === 'hidden' || style.display === 'none') return false;
+      // Root document.scrollingElement can have a 0-height client rect in CSS-reset/quirks layouts
+      // even when the viewport itself is scrollable and visible.
+      if (el === document.scrollingElement) {
+        return innerWidth > 0 && innerHeight > 0;
+      }
+      return visible(el);
     };
     const dialogs = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog[open]')].filter(visible);
     const modal = dialogs.at(-1) || null;
@@ -54,13 +74,22 @@ export async function advanceOcrSearch(
       });
       // A modal with no scrollable content must never fall back to the page behind it.
       const el = pool[0] || (!modal ? root : null);
-      if (!el) return { blocked: true };
+      if (!el) return { blocked: true, blockReason: 'SCROLL_CONTAINER_UNAVAILABLE', hasModal: Boolean(modal) };
+      const containerType = el === root ? 'document_scrolling_element' : 'modal_or_element';
       const fraction = ${JSON.stringify(matchTo)} === 'top' ? 1/3 : ${JSON.stringify(matchTo)} === 'middle' ? 2/3 : 1;
-      state = globalThis.__creatorOcrScroll = { el, modal, fraction,
+      state = globalThis.__creatorOcrScroll = { el, modal, containerType, fraction,
         traveled: 0 };
     }
     const el = state.el;
-    if (state.modal !== modal || !el.isConnected || !visible(el)) return { blocked: true };
+    if (state.modal !== modal) {
+      return { blocked: true, blockReason: 'MODAL_CHANGED', containerType: state.containerType, hadModal: Boolean(state.modal), hasModal: Boolean(modal) };
+    }
+    if (!el.isConnected) {
+      return { blocked: true, blockReason: 'SCROLL_ELEMENT_DISCONNECTED', containerType: state.containerType };
+    }
+    if (!isScrollTargetVisible(el)) {
+      return { blocked: true, blockReason: 'SCROLL_ELEMENT_NOT_VISIBLE', containerType: state.containerType };
+    }
     const before = el.scrollTop;
     const goal = Math.max(0, el.scrollHeight * state.fraction - el.clientHeight);
     const region = () => {
@@ -83,17 +112,20 @@ export async function advanceOcrSearch(
       const moved = Math.abs(el.scrollTop-before);
       state.traveled += moved;
       return { moved: moved > 0.5, reached: state.traveled >= 8000/${zoom}, reason: 'EDGE_RECENTER',
+        containerType: state.containerType,
         deltaYDip: (el.scrollTop-before)*${zoom}, searchRegion: region(), scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, goal };
     }
-    if (${inspect}) return { moved: false, reached: false, reason: 'SCAN_REGION', searchRegion: region(),
+    if (${inspect}) return { moved: false, reached: false, reason: 'SCAN_REGION', containerType: state.containerType, searchRegion: region(),
       scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, goal };
     if (${start}) {
       el.scrollTo({ top: 0, behavior: 'instant' });
       return { moved: Math.abs(before-el.scrollTop)>0.5, reached: false,
+        containerType: state.containerType,
         reason: el.scrollTop <= 1 ? 'SCAN_START' : 'RESET_FAILED', scrollTop: el.scrollTop, goal };
     }
     const remaining = goal-before;
     if (remaining <= 1) return { moved: false, reached: true, reason: "DESTINATION_REACHED",
+      containerType: state.containerType,
       scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, goal, searchRegion: region() };
     // 200 DIP per capture, also capped by visible height to retain overlap.
     const distance = Math.min(200 / ${zoom}, el.clientHeight * 0.7, remaining);
@@ -102,11 +134,22 @@ export async function advanceOcrSearch(
     state.traveled += moved;
     return { moved: moved > 0.5, reached: state.traveled >= 8000 / ${zoom},
       reason: moved <= 0.5 ? 'SCROLL_STALLED' : 'SCROLLED',
+      containerType: state.containerType,
       scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, goal };
   })()` }]);
   if (progress.reason === "RESET_FAILED")
     throw new TargetNotConfident("SCAN_RESET_FAILED: không thể về đầu vùng cuộn; chưa gửi action.");
-  if (progress.blocked)
-    throw new TargetNotConfident("SCROLL_CONTAINER_CHANGED: vùng cuộn/modal đã đổi hoặc không cuộn được; chưa gửi action.");
+  if (progress.blocked) {
+    const blockReason: ScrollBlockReason = progress.blockReason ?? "SCROLL_CONTAINER_UNAVAILABLE";
+    logClientEvent("OCR_SCROLL_BLOCKED", {
+      blockReason,
+      containerType: progress.containerType ?? null,
+      hadModal: progress.hadModal ?? null,
+      hasModal: progress.hasModal ?? null,
+    });
+    throw new TargetNotConfident(
+      `SCROLL_CONTAINER_CHANGED: ${blockReason} — vùng cuộn/modal đã đổi hoặc không cuộn được; chưa gửi action.`
+    );
+  }
   return progress;
 }

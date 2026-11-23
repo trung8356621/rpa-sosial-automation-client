@@ -12,6 +12,7 @@ import { effectiveMatchTo } from "./match-to.js";
 import { findOcrCandidates, normalizeOcrText } from "./ocr-candidates.js";
 import { confirmOcrContext } from "./ocr-context.js";
 import { matchTemplate, type ImageSearchTrace } from "./visual.js";
+import { logClientEvent } from "../main-error-log.js";
 export const MIN_OCR_CONFIDENCE = 80;
 export class TargetNotConfident extends Error {
   constructor(
@@ -110,16 +111,42 @@ export async function resolveVisualTarget(
     const trace: ResolutionTrace = { mode: "auto", attempts: [], context: [] };
     const allCandidates = findOcrCandidates(result, target.ocr);
     const candidates = allCandidates.filter(candidate => withinRegion(candidate.bbox));
+    const outsideRegionCount = allCandidates.length - candidates.length;
     for (const candidate of allCandidates.filter(candidate => !withinRegion(candidate.bbox)))
       trace.attempts.push({ method: "ocr", outcome: "not_confident", confidence: candidate.confidence,
         reason: "OUTSIDE_SCROLL_CONTAINER", x: candidate.bbox.x+candidate.bbox.width/2, y: candidate.bbox.y+candidate.bbox.height/2 });
     // Preserve complete line/word evidence until candidates have been assembled.
     // Context can use all text visible inside the container, including at its edges.
     const contextOcr = { ...result, segments: result.segments.filter(segment => withinRegion(segment.bbox)) };
-    if (!candidates.length) throw new OcrNotFound(trace);
-    if (candidates.length > 32) throw new TargetNotConfident("CONTEXT_AMBIGUOUS: quá nhiều dòng chữ trùng trong viewport; không click.", trace, true);
+    if (!candidates.length) {
+      logClientEvent("OCR_CANDIDATES", {
+        totalSegments: result.segments.length,
+        matchedCandidates: allCandidates.length,
+        inRegionCandidates: 0,
+        outsideRegionCount,
+        lowConfidenceCount: 0,
+        confidentCount: 0,
+        confirmedCount: 0,
+        rejectionReasons: [outsideRegionCount > 0 ? "OUTSIDE_SCROLL_CONTAINER" : "NO_CANDIDATE"],
+      });
+      throw new OcrNotFound(trace);
+    }
+    if (candidates.length > 32) {
+      logClientEvent("OCR_CANDIDATES", {
+        totalSegments: result.segments.length,
+        matchedCandidates: allCandidates.length,
+        inRegionCandidates: candidates.length,
+        outsideRegionCount,
+        lowConfidenceCount: 0,
+        confidentCount: 0,
+        confirmedCount: 0,
+        rejectionReasons: ["CONTEXT_AMBIGUOUS_TOO_MANY"],
+      });
+      throw new TargetNotConfident("CONTEXT_AMBIGUOUS: quá nhiều dòng chữ trùng trong viewport; không click.", trace, true);
+    }
     const confirmed: NonNullable<Result["match"]>[] = [];
     const confident: NonNullable<Result["match"]>[] = [];
+    let lowConfidenceCount = 0;
     for (const candidate of candidates) {
       let found: NonNullable<Result["match"]>;
       try {
@@ -127,6 +154,7 @@ export async function resolveVisualTarget(
           { x: 0, y: 0, width: size.width!, height: size.height! });
       } catch (error) {
         if (!(error instanceof TargetNotConfident) || !error.message.startsWith("OCR_LOW_CONFIDENCE")) throw error;
+        lowConfidenceCount += 1;
         trace.attempts.push({ method: "ocr", outcome: "not_confident", reason: (error as Error).message,
           x: candidate.bbox.x+candidate.bbox.width/2, y: candidate.bbox.y+candidate.bbox.height/2, confidence: candidate.confidence });
         continue;
@@ -139,6 +167,22 @@ export async function resolveVisualTarget(
       trace.context!.push(context);
       if (context.confirmed) confirmed.push(found);
     }
+    const rejectionReasons: string[] = [];
+    if (outsideRegionCount > 0) rejectionReasons.push("OUTSIDE_SCROLL_CONTAINER");
+    if (lowConfidenceCount > 0) rejectionReasons.push("OCR_LOW_CONFIDENCE");
+    if (confirmed.length > 1 || (confirmed.length === 0 && confident.length > 1)) {
+      rejectionReasons.push("CONTEXT_AMBIGUOUS");
+    }
+    logClientEvent("OCR_CANDIDATES", {
+      totalSegments: result.segments.length,
+      matchedCandidates: allCandidates.length,
+      inRegionCandidates: candidates.length,
+      outsideRegionCount,
+      lowConfidenceCount,
+      confidentCount: confident.length,
+      confirmedCount: confirmed.length,
+      rejectionReasons,
+    });
     if (confirmed.length > 1) throw new TargetNotConfident("CONTEXT_AMBIGUOUS: nhiều mục tiêu cùng chữ/ngữ cảnh; không click.", trace, true);
     if (confirmed.length === 1) {
       trace.selectedMethod = "ocr";

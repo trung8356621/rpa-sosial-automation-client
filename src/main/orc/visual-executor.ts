@@ -121,6 +121,12 @@ export class VisualOrcExecutor {
     if (action === "TYPE_ONLY") {
       if (!text) return { kind: "error", message: "TYPE_ONLY thiếu text" };
       onPhase?.("type");
+      logClientEvent("ORC_TYPE", {
+        stepId: stepId ?? null,
+        action,
+        dispatched: true,
+        valueLength: text.length,
+      });
       await this.host.typeText(text);
       return { kind: "ok", action };
     }
@@ -346,6 +352,16 @@ export class VisualOrcExecutor {
                 true
               );
               searchRegion = scope.searchRegion;
+              logClientEvent("OCR_SEARCH_SCOPE", {
+                stepId: stepId ?? null,
+                matchTo,
+                containerType: scope.containerType ?? null,
+                searchRegion: scope.searchRegion ?? null,
+                scrollTop: scope.scrollTop ?? null,
+                scrollHeight: scope.scrollHeight ?? null,
+                goal: scope.goal ?? null,
+                scrolls,
+              });
             }
 
             const resolved = await resolveVisualTarget(
@@ -380,6 +396,12 @@ export class VisualOrcExecutor {
               score: resolved.score,
             };
             selectedMatchingMethod = resolved.method ?? selectedMatchingMethod;
+            logClientEvent("OCR_TARGET_ACCEPTED", {
+              stepId: stepId ?? null,
+              method: resolved.method ?? selectedMatchingMethod,
+              score: resolved.score,
+              confidence: resolved.confidence ?? bestOcrConfidence,
+            });
             break;
           } catch (error) {
             if (error instanceof TargetNotConfident) recordTrace(error.resolution);
@@ -458,8 +480,10 @@ export class VisualOrcExecutor {
       onPhase?.("click");
       this.host.click(match.x, match.y, current.width, current.height);
       logClientEvent("ORC_CLICK", {
+        stepId: stepId ?? null,
         action,
         method: match.method,
+        dispatched: true,
         // never log OCR text / credentials
         hasTextPayload: Boolean(text),
       });
@@ -490,6 +514,12 @@ export class VisualOrcExecutor {
           return { kind: "error", message: "CLICK_AND_TYPE thiếu text/variable binding" };
         }
         onPhase?.("type");
+        logClientEvent("ORC_TYPE", {
+          stepId: stepId ?? null,
+          action,
+          dispatched: true,
+          valueLength: text.length,
+        });
         await this.host.typeText(text);
       }
 

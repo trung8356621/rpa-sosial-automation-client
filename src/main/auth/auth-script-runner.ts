@@ -270,6 +270,13 @@ export class AuthScriptRunner {
             (varKey && bindings.values[varKey]) ||
             (typeof step.value === "string" ? step.value : undefined) ||
             payload.text;
+          logClientEvent("STEP_INPUT_RESOLVED", {
+            stepIndex: i,
+            action: normalizeAuthAction(step.action),
+            variableKey: varKey || null,
+            variablePresent: Boolean(text),
+            valueLength: typeof text === "string" ? text.length : 0,
+          });
 
           // Per-step environment may request exact Creator size.
           if (payload.target.environment && params.applyViewport) {
@@ -340,6 +347,11 @@ export class AuthScriptRunner {
               out.kind === "blocked" &&
               out.confirmedNotFound === true;
             const failureCode = out.kind === "blocked" ? out.code : "ORC_ERROR";
+            logClientEvent("STEP_FAILED", {
+              stepIndex: i,
+              stepNumber,
+              code: failureCode,
+            });
             params.onProgress?.({
               kind: "step_failed",
               stepNumber,

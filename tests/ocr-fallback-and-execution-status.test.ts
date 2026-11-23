@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import sharp from "sharp";
 import type { WebContents } from "electron";
 import { AuthScriptRunner, type AuthRunOutcome } from "../src/main/auth/auth-script-runner.js";
 import type { AccountCredentialSource } from "../src/main/auth/credential-mapper.js";
@@ -21,6 +22,9 @@ import {
   formatAuthStatusDisplay,
   shouldDisplayAuthStatusInBrowserWorkspace,
 } from "../src/shared/auth-status.js";
+import { setLogListener } from "../src/main/main-error-log.js";
+import { resolveJobVariableBindings } from "../src/main/jobs/job-input-bindings.js";
+import { resolveVisualTarget } from "../src/main/orc/target-resolver.js";
 import type { ExecutionStatus } from "../src/shared/contracts.js";
 
 const VI_CONTENT_DIGEST = "1".repeat(64);
@@ -687,4 +691,266 @@ test("7. Browser workspace hides non-critical auth banners (SESSION_VALID) while
 
   const humanRequired = formatAuthStatusDisplay("HUMAN_REQUIRED", null, "2FA required");
   assert.equal(shouldDisplayAuthStatusInBrowserWorkspace(humanRequired), true);
+});
+
+test("8. Valid claim.input.title reaches Step 0 and accepted target dispatches click/type while blocked target does not", async () => {
+  const framePng = await sharp({
+    create: { width: 200, height: 80, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } },
+  })
+    .png()
+    .toBuffer();
+  const title = "A".repeat(47);
+  const bindings = await resolveJobVariableBindings({
+    variables: [{ key: "title", type: "text" }],
+    jobInput: { title },
+    account: { accountId: "acc-1", siteUrl: "https://maytuicanvas.com", getPassword: async () => "" },
+  });
+  assert.equal(bindings.ok, true);
+  if (bindings.ok) {
+    assert.equal(bindings.values.title, title);
+    assert.equal(bindings.values.title.length, 47);
+  }
+
+  let clickCount = 0;
+  let typedText = "";
+  const fakeWc = {
+    isDestroyed: () => false,
+    getURL: () => "https://maytuicanvas.com/wp-admin/post-new.php",
+    setZoomFactor: () => {},
+    getZoomFactor: () => 1,
+    debugger: {
+      isAttached: () => false,
+      attach: () => {},
+      sendCommand: async () => ({ data: framePng.toString("base64") }),
+    },
+    capturePage: async () => ({
+      toPNG: () => framePng,
+      getSize: () => ({ width: 200, height: 80 }),
+    }),
+    focus: () => {},
+    sendInputEvent: (ev: { type?: string; keyCode?: string }) => {
+      if (ev?.type === "mouseDown") clickCount += 1;
+      if (ev?.type === "char" && typeof ev.keyCode === "string") typedText += ev.keyCode;
+    },
+    insertText: async (t: string) => {
+      typedText += t;
+    },
+    executeJavaScript: async () => 1,
+    executeJavaScriptInIsolatedWorld: async (_w: number, scripts: Array<{ code: string }>) => {
+      const code = scripts[0]?.code ?? "";
+      if (code.includes("delete globalThis.__creatorOcrScroll")) return undefined;
+      return {
+        moved: false,
+        reached: false,
+        reason: "SCAN_REGION",
+        containerType: "document_scrolling_element",
+        searchRegion: { x: 0, y: 0, width: 1024, height: 560 },
+        scrollTop: 0,
+        scrollHeight: 1200,
+        goal: 400,
+      };
+    },
+  } as unknown as WebContents;
+
+  const logs: string[] = [];
+  setLogListener((entry) => logs.push(entry.message));
+  try {
+    const host = new OrcBrowserHost(fakeWc, { x: 0, y: 0, width: 1024, height: 560 });
+    const ocr: OcrEngine = {
+      recognize: async () => ({
+        text: "Thêm tiêu đề",
+        confidence: 96,
+        language: "vie+eng",
+        segments: [
+          {
+            id: "seg-1",
+            kind: "line",
+            text: "Thêm tiêu đề",
+            confidence: 96,
+            bbox: { x: 10, y: 10, width: 80, height: 20 },
+          },
+        ],
+      }),
+    };
+    const executor = new VisualOrcExecutor(host, ocr);
+    const out = await executor.executeVisualStep({
+      payload: {
+        action: "CLICK_AND_TYPE",
+        target: {
+          asset: "assets/title.png",
+          roi: { x: 0, y: 0, width: 200, height: 80 },
+          matchTo: "middle",
+          ocr: {
+            kind: "line",
+            text: "Thêm tiêu đề",
+            bbox: { x: 10, y: 10, width: 80, height: 20 },
+            confidence: 95,
+            confirmed: true,
+            language: "vie+eng",
+          },
+        },
+      },
+      template: framePng,
+      text: title,
+      stepId: "step-0",
+    });
+
+    assert.equal(out.kind, "ok", out.kind !== "ok" ? out.message : "");
+    assert.ok(clickCount > 0, "Click must be dispatched for accepted target");
+    assert.equal(typedText, title, "47-char title must be typed after accepted click");
+    assert.ok(logs.some((m) => m.startsWith("OCR_TARGET_ACCEPTED ")));
+    assert.ok(logs.some((m) => m.startsWith("ORC_CLICK ") && m.includes('"dispatched":true')));
+    assert.ok(logs.some((m) => m.startsWith("ORC_TYPE ") && m.includes('"valueLength":47')));
+    assert.ok(!logs.some((m) => m.includes(title)), "Article title text must never be logged");
+  } finally {
+    setLogListener(null);
+  }
+});
+
+test("9. Scroll container invalidation reasons are separated and logged under OCR_SCROLL_BLOCKED", async () => {
+  const reasons = [
+    "MODAL_CHANGED",
+    "SCROLL_ELEMENT_DISCONNECTED",
+    "SCROLL_ELEMENT_NOT_VISIBLE",
+    "SCROLL_CONTAINER_UNAVAILABLE",
+  ] as const;
+
+  for (const blockReason of reasons) {
+    let call = 0;
+    const fakeWc = {
+      isDestroyed: () => false,
+      getURL: () => "https://maytuicanvas.com/wp-admin/post-new.php",
+      setZoomFactor: () => {},
+      getZoomFactor: () => 1,
+      debugger: {
+        isAttached: () => false,
+        attach: () => {},
+        sendCommand: async () => ({ data: TINY_PNG.toString("base64") }),
+      },
+      capturePage: async () => ({
+        toPNG: () => TINY_PNG,
+        getSize: () => ({ width: 1024, height: 560 }),
+      }),
+      sendInputEvent: () => {
+        throw new Error("Must not click when scroll container is blocked");
+      },
+      insertText: async () => {
+        throw new Error("Must not type when scroll container is blocked");
+      },
+      executeJavaScriptInIsolatedWorld: async (_w: number, scripts: Array<{ code: string }>) => {
+        const code = scripts[0]?.code ?? "";
+        if (code.includes("delete globalThis.__creatorOcrScroll")) return undefined;
+        call += 1;
+        if (call <= 2) {
+          return {
+            moved: false,
+            reached: false,
+            reason: "SCAN_REGION",
+            containerType: "document_scrolling_element",
+            searchRegion: { x: 0, y: 0, width: 1024, height: 560 },
+            scrollTop: 0,
+            scrollHeight: 1200,
+            goal: 400,
+          };
+        }
+        return { blocked: true, blockReason, containerType: "document_scrolling_element" };
+      },
+    } as unknown as WebContents;
+
+    const logs: string[] = [];
+    setLogListener((entry) => logs.push(entry.message));
+    try {
+      const host = new OrcBrowserHost(fakeWc, { x: 0, y: 0, width: 1024, height: 560 });
+      const executor = new VisualOrcExecutor(host, {
+        recognize: async () => ({ text: "", segments: [], confidence: 0, language: "vie+eng" }),
+      });
+      const out = await executor.executeVisualStep({
+        payload: {
+          action: "CLICK_AND_TYPE",
+          target: {
+            asset: "assets/title.png",
+            roi: { x: 0, y: 0, width: 1024, height: 560 },
+            matchTo: "middle",
+            ocr: {
+              kind: "line",
+              text: "Thêm tiêu đề",
+              bbox: { x: 0, y: 0, width: 100, height: 20 },
+              confidence: 95,
+              confirmed: true,
+              language: "vie+eng",
+            },
+          },
+        },
+        template: TINY_PNG,
+        text: "Title",
+        stepId: "step-0",
+      });
+      assert.equal(out.kind, "blocked");
+      if (out.kind === "blocked") {
+        assert.equal(out.code, "SCROLL_CONTAINER_CHANGED");
+        assert.equal(out.confirmedNotFound, false);
+        assert.ok(out.message.includes(blockReason));
+      }
+      assert.ok(
+        logs.some((m) => m.startsWith("OCR_SCROLL_BLOCKED ") && m.includes(blockReason)),
+        `Expected OCR_SCROLL_BLOCKED with ${blockReason}`
+      );
+      assert.ok(logs.some((m) => m.startsWith("OCR_SEARCH_SCOPE ") && m.includes("document_scrolling_element")));
+    } finally {
+      setLogListener(null);
+    }
+  }
+});
+
+test("10. OCR_CANDIDATES distinguishes outside-region and low-confidence rejections", async () => {
+  const logs: string[] = [];
+  setLogListener((entry) => logs.push(entry.message));
+  try {
+    await assert.rejects(
+      () =>
+        resolveVisualTarget(
+          TINY_PNG,
+          TINY_PNG,
+          {
+            action: "CLICK_AND_TYPE",
+            target: {
+              asset: "assets/title.png",
+              roi: { x: 0, y: 0, width: 1, height: 1 },
+              matchTo: "middle",
+              ocr: {
+                kind: "line",
+                text: "Thêm tiêu đề",
+                bbox: { x: 0, y: 0, width: 10, height: 10 },
+                confidence: 95,
+                confirmed: true,
+                language: "vie+eng",
+              },
+            },
+          },
+          {
+            recognize: async () => ({
+              text: "Thêm tiêu đề",
+              confidence: 95,
+              language: "vie+eng",
+              segments: [
+                {
+                  id: "outside",
+                  kind: "line",
+                  text: "Thêm tiêu đề",
+                  confidence: 95,
+                  bbox: { x: 900, y: 900, width: 50, height: 20 },
+                },
+              ],
+            }),
+          },
+          { x: 0, y: 0, width: 100, height: 100 }
+        ),
+      /NOT_FOUND/
+    );
+    const candLog = logs.find((m) => m.startsWith("OCR_CANDIDATES "));
+    assert.ok(candLog, "Expected OCR_CANDIDATES log");
+    assert.ok(candLog.includes("OUTSIDE_SCROLL_CONTAINER"));
+  } finally {
+    setLogListener(null);
+  }
 });
