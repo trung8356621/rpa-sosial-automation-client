@@ -579,6 +579,8 @@ export class CampaignJobExecutor {
           restoreViewport: () => this.host.restoreViewport(),
           downloadAsset,
           inputValues: bindings.values,
+          jobId: claim.job_id,
+          attemptId: claim.attempt_id,
           onProgress: (ev) => {
             if (ev.kind === "step_phase") {
               const transitionFrom = pendingFallbackTransitionFrom;
