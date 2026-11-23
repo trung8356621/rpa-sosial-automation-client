@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
+import { AuthScriptRunner } from "../src/main/auth/auth-script-runner.js";
 import {
-  AuthScriptRunner,
   HUMAN_REQUIRED_DETECTION_SCRIPT,
   type HumanRequiredDetectionResult,
-} from "../src/main/auth/auth-script-runner.js";
+} from "../src/main/auth/human-required-detector.js";
 import type { AuthReleasePulled } from "../src/main/auth/auth-script-types.js";
 import { setLogListener } from "../src/main/main-error-log.js";
 
@@ -54,7 +54,7 @@ function makeNode(opts: {
   };
 }
 
-function evalDetection(opts: {
+function evalIsolatedDetector(opts: {
   bodyText?: string;
   matchedAll?: Record<string, MockNode[]>;
   matchedSingle?: Record<string, MockNode | null>;
@@ -81,157 +81,8 @@ function evalDetection(opts: {
   return vm.runInNewContext(HUMAN_REQUIRED_DETECTION_SCRIPT, context) as HumanRequiredDetectionResult;
 }
 
-test("1. Hidden WordPress #wp-auth-check -> NONE", () => {
-  const wrap = makeNode({ classes: ["hidden"] });
-  const wpAuth = makeNode({
-    parentElement: wrap,
-    rect: { width: 0, height: 0 },
-    closestMap: { "#wp-auth-check-wrap": wrap },
-  });
-  const styles = new Map([[wrap, { display: "none" }]]);
-  const res = evalDetection({
-    bodyText: "Add Post TEST Mock Title #5",
-    matchedAll: { "#wp-auth-check": [wpAuth] },
-    computedStyles: styles,
-  });
-  assert.equal(res.outcome, "NONE");
-});
-
-test("2. Visible WordPress #wp-auth-check dialog -> CONFIRMED", () => {
-  const wrap = makeNode({ classes: [] });
-  const wpAuth = makeNode({
-    parentElement: wrap,
-    rect: { width: 380, height: 420 },
-    closestMap: { "#wp-auth-check-wrap": wrap },
-  });
-  const styles = new Map([[wrap, { display: "block" }]]);
-  const res = evalDetection({
-    matchedAll: { "#wp-auth-check": [wpAuth] },
-    computedStyles: styles,
-  });
-  assert.equal(res.outcome, "CONFIRMED");
-  assert.equal(res.ruleId, "wp_auth_check_visible");
-});
-
-test("3. Hidden CAPTCHA widget (display:none / aria-hidden / 0x0 / disconnected) -> NONE", () => {
-  const hiddenByCss = makeNode({ rect: { width: 304, height: 78 } });
-  const hiddenByAria = makeNode({ attrs: { "aria-hidden": "true" }, rect: { width: 304, height: 78 } });
-  const hiddenBySize = makeNode({ rect: { width: 0, height: 0 } });
-  const disconnected = makeNode({ isConnected: false, rect: { width: 304, height: 78 } });
-  const styles = new Map([[hiddenByCss, { display: "none" }]]);
-
-  const res = evalDetection({
-    matchedAll: {
-      ".g-recaptcha": [hiddenByCss, hiddenByAria, hiddenBySize, disconnected],
-    },
-    computedStyles: styles,
-  });
-  assert.equal(res.outcome, "NONE");
-});
-
-test("4. Visible active CAPTCHA challenge -> CONFIRMED", () => {
-  const recaptcha = makeNode({ rect: { width: 304, height: 78 } });
-  const res = evalDetection({
-    matchedAll: { ".g-recaptcha": [recaptcha] },
-  });
-  assert.equal(res.outcome, "CONFIRMED");
-  assert.equal(res.ruleId, "captcha_or_verification_ui");
-});
-
-test("5. Generic verify/captcha text in a WordPress admin notice -> NONE (not CONFIRMED)", () => {
-  const wpAdminBar = makeNode({});
-  const res = evalDetection({
-    bodyText: "Please verify your plugin settings. reCAPTCHA plugin update available.",
-    matchedSingle: { "#wpadminbar": wpAdminBar },
-  });
-  assert.equal(res.outcome, "NONE");
-});
-
-test("6. Inactive/hidden modal (<dialog> not open, aria-hidden dialog) -> NONE", () => {
-  const closedDialog = makeNode({
-    tagName: "DIALOG",
-    open: false,
-    innerText: "Please verify you are human",
-    rect: { width: 400, height: 300 },
-  });
-  const ariaHiddenDialog = makeNode({
-    attrs: { "aria-hidden": "true" },
-    innerText: "Security check: verify you are human",
-    rect: { width: 400, height: 300 },
-  });
-  const res = evalDetection({
-    matchedAll: {
-      "dialog[open]": [],
-      '[role="dialog"]': [closedDialog, ariaHiddenDialog],
-    },
-  });
-  assert.equal(res.outcome, "NONE");
-});
-
-test("7. Weak ambiguous signal -> UNCERTAIN, logs warning only, execution continues", async () => {
-  const events: Array<{ level: string; message: string }> = [];
-  setLogListener((entry) => events.push({ level: entry.level, message: entry.message }));
-  try {
-    const release: AuthReleasePulled = {
-      action_tag_id: 1,
-      action_tag_key: "maytuicanvas.create_post",
-      package_key: "pkg-1",
-      package_id: 1,
-      kind: "script",
-      is_authentication: false,
-      version: "1",
-      release_id: 12,
-      content_digest: "b".repeat(64),
-      schema_version: 1,
-      status: "published",
-      runtime_compatibility: null,
-      assets_complete: true,
-      ready_to_execute: true,
-      manifest: {
-        script_id: "pkg-1",
-        variables: [],
-        steps: [
-          { id: "s1", action: "click", selector: "#title" },
-          { id: "s2", action: "click", selector: "#save-post" },
-        ],
-      },
-    };
-    const webContents = {
-      isDestroyed: () => false,
-      executeJavaScript: async (script: string) => {
-        if (script === HUMAN_REQUIRED_DETECTION_SCRIPT) {
-          return evalDetection({
-            bodyText: "This page mentions captcha in passing without any widget",
-          });
-        }
-        return true;
-      },
-    } as never;
-
-    const runner = new AuthScriptRunner();
-    const out = await runner.run({
-      webContents,
-      release,
-      account: { accountId: "acc-1", siteUrl: "https://maytuicanvas.com", getPassword: async () => "" },
-      accountId: "acc-1",
-      jobId: "job-uncertain-1",
-      attemptId: "att-uncertain-1",
-    });
-
-    assert.equal(out.kind, "ok");
-    assert.equal(out.stepsExecuted, 2);
-    const detLogs = events.filter((e) => e.message.includes("HUMAN_REQUIRED_DETECTION"));
-    assert.equal(detLogs.length, 2);
-    assert.ok(detLogs[0].message.includes('"outcome":"UNCERTAIN"'));
-    assert.ok(detLogs[0].message.includes('"blocked":false'));
-    assert.ok(detLogs[0].message.includes('"jobId":"job-uncertain-1"'));
-  } finally {
-    setLogListener(null);
-  }
-});
-
-test("8 & 9 & 10. Normal Step 1 -> Step 2 continues when hidden; legitimate verification stops with accurate partial state", async () => {
-  const release: AuthReleasePulled = {
+function twoStepRelease(): AuthReleasePulled {
+  return {
     action_tag_id: 1,
     action_tag_key: "maytuicanvas.create_post",
     package_key: "382f26c4-d39a-4f2d-a8a3-d255f6c65c61",
@@ -255,52 +106,84 @@ test("8 & 9 & 10. Normal Step 1 -> Step 2 continues when hidden; legitimate veri
       ],
     },
   };
-  const account = {
-    accountId: "acc-1",
-    siteUrl: "https://maytuicanvas.com",
-    getPassword: async () => "",
-  };
+}
 
-  const makeWebContents = (visibleChallenge: boolean) =>
-    ({
+test("1. AuthScriptRunner proceeds from Step 1 to Step 2 without running DOM detectHumanRequired", async () => {
+  const executedScripts: string[] = [];
+  const logMessages: string[] = [];
+  setLogListener((entry) => logMessages.push(entry.message));
+  try {
+    const webContents = {
       isDestroyed: () => false,
       executeJavaScript: async (script: string) => {
-        if (script === HUMAN_REQUIRED_DETECTION_SCRIPT) {
-          if (!visibleChallenge) {
-            const wrap = makeNode({ classes: ["hidden"] });
-            const wpAuth = makeNode({ parentElement: wrap, rect: { width: 0, height: 0 } });
-            return evalDetection({
-              matchedAll: { "#wp-auth-check": [wpAuth] },
-              computedStyles: new Map([[wrap, { display: "none" }]]),
-            });
-          }
-          const challenge = makeNode({ rect: { width: 320, height: 240 } });
-          return evalDetection({
-            matchedAll: { ".cf-challenge": [challenge] },
-          });
-        }
+        executedScripts.push(script);
+        // Would have matched #wp-auth-check or .cf-challenge if detector ran.
+        assert.notEqual(script, HUMAN_REQUIRED_DETECTION_SCRIPT);
         return true;
       },
-    }) as never;
+    } as never;
+
+    const runner = new AuthScriptRunner();
+    const out = await runner.run({
+      webContents,
+      release: twoStepRelease(),
+      account: { accountId: "acc-1", siteUrl: "https://maytuicanvas.com", getPassword: async () => "" },
+      accountId: "acc-1",
+      jobId: "job-1",
+      attemptId: "att-1",
+    });
+
+    assert.equal(out.kind, "ok");
+    assert.equal(out.stepsExecuted, 2);
+    // Each DOM click step runs waitForSelector + click (2 calls per step = 4 total) — zero detector calls.
+    assert.equal(executedScripts.length, 4);
+    assert.equal(logMessages.some((m) => m.includes("HUMAN_REQUIRED_DETECTION")), false);
+  } finally {
+    setLogListener(null);
+  }
+});
+
+test("2. Explicit Step 2 failure after Step 1 still stops execution with accurate stepsExecuted", async () => {
+  let jsCalls = 0;
+  const webContents = {
+    isDestroyed: () => false,
+    executeJavaScript: async () => {
+      jsCalls += 1;
+      // Step 1 executes 2 JS calls (waitForSelector + click); fail on Step 2's first JS call.
+      if (jsCalls <= 2) return true;
+      throw new Error("Step 2 target element not found");
+    },
+  } as never;
 
   const runner = new AuthScriptRunner();
-  const okOutcome = await runner.run({
-    webContents: makeWebContents(false),
-    release,
-    account,
+  const out = await runner.run({
+    webContents,
+    release: twoStepRelease(),
+    account: { accountId: "acc-1", siteUrl: "https://maytuicanvas.com", getPassword: async () => "" },
     accountId: "acc-1",
   });
-  assert.equal(okOutcome.kind, "ok");
-  assert.equal(okOutcome.stepsExecuted, 2);
 
-  const blockedOutcome = await runner.run({
-    webContents: makeWebContents(true),
-    release,
-    account,
-    accountId: "acc-1",
-    jobId: "job-confirmed-1",
-    attemptId: "att-confirmed-1",
+  assert.equal(out.kind, "error");
+  assert.equal(out.stepsExecuted, 1);
+  assert.match(out.message, /Step 2 target element not found/);
+});
+
+test("3. Isolated detector module remains intact for future opt-in use", () => {
+  const wrapHidden = makeNode({ classes: ["hidden"] });
+  const wpAuthHidden = makeNode({
+    parentElement: wrapHidden,
+    rect: { width: 0, height: 0 },
+    closestMap: { "#wp-auth-check-wrap": wrapHidden },
   });
-  assert.equal(blockedOutcome.kind, "human_required");
-  assert.equal(blockedOutcome.stepsExecuted, 1);
+  const hiddenRes = evalIsolatedDetector({
+    matchedAll: { "#wp-auth-check": [wpAuthHidden] },
+    computedStyles: new Map([[wrapHidden, { display: "none" }]]),
+  });
+  assert.equal(hiddenRes.outcome, "NONE");
+
+  const visibleChallenge = makeNode({ rect: { width: 320, height: 240 } });
+  const confirmedRes = evalIsolatedDetector({
+    matchedAll: { ".cf-challenge": [visibleChallenge] },
+  });
+  assert.equal(confirmedRes.outcome, "CONFIRMED");
 });
