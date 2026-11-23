@@ -24,8 +24,14 @@ import { logClientEvent, logClientError } from "../main-error-log.js";
 
 export type VisualStepOutcome =
   | { kind: "ok"; action: string; x?: number; y?: number; method?: string }
-  | { kind: "blocked"; message: string; code: string }
-  | { kind: "error"; message: string };
+  | {
+      kind: "blocked";
+      message: string;
+      code: string;
+      confirmedNotFound?: boolean;
+      mutated?: boolean;
+    }
+  | { kind: "error"; message: string; mutated?: boolean };
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -269,6 +275,7 @@ export class VisualOrcExecutor {
       let searchRegion: Rect | undefined;
       let current = before;
       let match: { x: number; y: number; method?: string; score: number } | undefined;
+      let mutated = false;
 
       if (matchTo) await clearOcrSearch(this.host.webContents);
 
@@ -283,6 +290,7 @@ export class VisualOrcExecutor {
               false
             );
             if (reset.moved) {
+              mutated = true;
               await sleep(120);
               current = await this.host.capture({ light: true });
             }
@@ -358,11 +366,18 @@ export class VisualOrcExecutor {
             if (error instanceof OcrTechnicalError) throw error;
             if (!matchTo || !(error instanceof OcrNotFound)) {
               if (error instanceof TargetNotConfident) {
+                const confirmedNotFound =
+                  !mutated &&
+                  !error.ambiguous &&
+                  ((error instanceof OcrNotFound && error.outcome === "NOT_FOUND") ||
+                    error.resolution?.ocrOutcome === "NOT_FOUND");
                 emitDiagnostic("not_confident", error.message, error.message);
                 return {
                   kind: "blocked",
-                  code: "TARGET_NOT_CONFIDENT",
+                  code: confirmedNotFound ? "NOT_FOUND" : "TARGET_NOT_CONFIDENT",
                   message: error.message,
+                  confirmedNotFound,
+                  mutated,
                 };
               }
               throw error;
@@ -373,6 +388,8 @@ export class VisualOrcExecutor {
                 kind: "blocked",
                 code: "SCROLL_LIMIT",
                 message: error.message,
+                confirmedNotFound: false,
+                mutated: true,
               };
             }
             const progress = await advanceOcrSearch(
@@ -386,8 +403,11 @@ export class VisualOrcExecutor {
                 kind: "blocked",
                 code: progress.reason ?? "SCROLL_STALLED",
                 message: error.message,
+                confirmedNotFound: false,
+                mutated,
               };
             }
+            mutated = true;
             scrolls += 1;
             await sleep(250);
             current = await this.host.capture({ light: true });
@@ -399,7 +419,13 @@ export class VisualOrcExecutor {
 
       if (!match) {
         emitDiagnostic("not_found", "no_match", "NOT_FOUND");
-        return { kind: "blocked", code: "NOT_FOUND", message: "Không resolve được target." };
+        return {
+          kind: "blocked",
+          code: "NOT_FOUND",
+          message: "Không resolve được target.",
+          confirmedNotFound: !mutated,
+          mutated,
+        };
       }
 
       if (action === "WAIT_VERIFY") {
@@ -407,6 +433,7 @@ export class VisualOrcExecutor {
         return { kind: "ok", action, x: match.x, y: match.y, method: match.method };
       }
 
+      mutated = true;
       this.host.click(match.x, match.y, current.width, current.height);
       logClientEvent("ORC_CLICK", {
         action,

@@ -34,6 +34,30 @@ export function createCampaignJobBrowserHost(params: {
         attemptId: shotParams.attemptId,
         errorCode: shotParams.code,
         artifactsDir,
+        outcome: "failed",
+        variantId: shotParams.variantId,
+        languageLabel: shotParams.languageLabel,
+        packageKey: shotParams.packageKey,
+        releaseId: shotParams.releaseId,
+        priority: shotParams.priority,
+        screenshotRole: shotParams.screenshotRole,
+        failedStep: shotParams.failedStep,
+      });
+    },
+    async captureSuccessScreenshot(shotParams) {
+      return captureAndPersistFailureScreenshot({
+        webContents: embeddedBrowser.getWebContents(),
+        jobId: shotParams.jobId,
+        attemptId: shotParams.attemptId,
+        errorCode: "OK",
+        artifactsDir,
+        outcome: "success",
+        variantId: shotParams.variantId,
+        languageLabel: shotParams.languageLabel,
+        packageKey: shotParams.packageKey,
+        releaseId: shotParams.releaseId,
+        priority: shotParams.priority,
+        screenshotRole: shotParams.screenshotRole ?? "final_success",
       });
     },
     async open(browserId: string) {

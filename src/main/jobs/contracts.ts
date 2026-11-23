@@ -15,6 +15,38 @@ export type CampaignRunMode = "test" | "live";
 export type CampaignExecutionMode = "one_account_one_job" | "one_account_many_jobs";
 export type CampaignJobResultStatus = "succeeded" | "failed" | "cancelled" | "unknown";
 
+export type CampaignScriptVariantCandidate = {
+  variant_id?: string;
+  priority?: number;
+  language_label?: string;
+  package_id?: number;
+  package_key?: string;
+  release_id?: number;
+  script_version?: string;
+  version?: string;
+  content_digest?: string;
+  execution_digest?: string;
+};
+
+export type CampaignScriptVariant = {
+  variant_id: string;
+  priority: number;
+  language_label: string;
+  package_id?: number;
+  package_key: string;
+  release_id: number;
+  script_version: string;
+  content_digest: string;
+  execution_digest: string;
+};
+
+export type CampaignFallbackPolicy = {
+  allowed_only_on: string;
+  single_attempt_identity: boolean;
+  success_screenshots: number;
+  failure_screenshots_per_attempted_variant: number;
+};
+
 /**
  * Claim payload. Exact script pin fields are required before pull/execute:
  * package_key (=script_id), version, release_id, content_digest, execution_digest.
@@ -49,6 +81,9 @@ export type CampaignJobClaim = {
   content_digest?: string;
   execution_digest?: string;
   execution_context?: AuthExecutionContext;
+  variant_group_id?: string;
+  script_variants?: CampaignScriptVariantCandidate[];
+  fallback_policy?: CampaignFallbackPolicy;
 };
 
 export type CampaignJobAckRequest = {
@@ -130,6 +165,8 @@ export function parseCampaignJobClaim(raw: unknown): CampaignJobClaim | null {
     r.input && typeof r.input === "object" && !Array.isArray(r.input)
       ? (r.input as Record<string, unknown>)
       : {};
+  const script_variants = parseScriptVariants(r.script_variants);
+  const fallback_policy = parseFallbackPolicy(r.fallback_policy);
   return {
     plan_version: posInt(r.plan_version),
     plan_tag_id: posInt(r.plan_tag_id),
@@ -155,7 +192,126 @@ export function parseCampaignJobClaim(raw: unknown): CampaignJobClaim | null {
     content_digest: digestHex(r.content_digest) || undefined,
     execution_digest: digestHex(r.execution_digest) || undefined,
     execution_context: parseExecutionContext(r.execution_context, r.resolved_url),
+    variant_group_id: str(r.variant_group_id) || undefined,
+    ...(script_variants ? { script_variants } : {}),
+    ...(fallback_policy ? { fallback_policy } : {}),
   };
+}
+
+function parseScriptVariants(raw: unknown): CampaignScriptVariantCandidate[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const out: CampaignScriptVariantCandidate[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      out.push({});
+      continue;
+    }
+    const v = item as Record<string, unknown>;
+    const priorityRaw = v.priority;
+    const priority =
+      typeof priorityRaw === "number" && Number.isInteger(priorityRaw)
+        ? priorityRaw
+        : typeof priorityRaw === "string" && priorityRaw.trim() !== "" && Number.isInteger(Number(priorityRaw))
+          ? Number(priorityRaw)
+          : undefined;
+    out.push({
+      variant_id: str(v.variant_id) || undefined,
+      priority,
+      language_label: str(v.language_label) || undefined,
+      package_id: posInt(v.package_id),
+      package_key: str(v.package_key) || str(v.script_id) || undefined,
+      release_id: posInt(v.release_id),
+      script_version: str(v.script_version) || str(v.version) || undefined,
+      version: str(v.version) || undefined,
+      content_digest: digestHex(v.content_digest) || undefined,
+      execution_digest: digestHex(v.execution_digest) || undefined,
+    });
+  }
+  return out;
+}
+
+function parseFallbackPolicy(raw: unknown): CampaignFallbackPolicy | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const p = raw as Record<string, unknown>;
+  const allowed_only_on = str(p.allowed_only_on);
+  if (!allowed_only_on) return undefined;
+  return {
+    allowed_only_on,
+    single_attempt_identity: p.single_attempt_identity !== false,
+    success_screenshots: posInt(p.success_screenshots) ?? 1,
+    failure_screenshots_per_attempted_variant:
+      posInt(p.failure_screenshots_per_attempted_variant) ?? 1,
+  };
+}
+
+/** Exact pin required for a single script variant. Never allow unpinned variants. */
+export function resolveVariantScriptPin(
+  variant: CampaignScriptVariantCandidate
+): CampaignScriptVariant | null {
+  const variant_id = str(variant.variant_id);
+  const language_label = str(variant.language_label);
+  const package_key = str(variant.package_key);
+  const script_version = str(variant.script_version) || str(variant.version);
+  const release_id = posInt(variant.release_id);
+  const content_digest = digestHex(variant.content_digest);
+  const execution_digest = digestHex(variant.execution_digest);
+  const priority =
+    typeof variant.priority === "number" && Number.isInteger(variant.priority)
+      ? variant.priority
+      : undefined;
+  if (
+    !variant_id ||
+    !language_label ||
+    !package_key ||
+    !script_version ||
+    !release_id ||
+    !content_digest ||
+    !execution_digest ||
+    priority === undefined
+  ) {
+    return null;
+  }
+  return {
+    variant_id,
+    priority,
+    language_label,
+    ...(variant.package_id ? { package_id: variant.package_id } : {}),
+    package_key,
+    release_id,
+    script_version,
+    content_digest,
+    execution_digest,
+  };
+}
+
+export function variantToScriptPin(variant: CampaignScriptVariant): CampaignScriptPin {
+  return {
+    package_key: variant.package_key,
+    version: variant.script_version,
+    release_id: variant.release_id,
+    content_digest: variant.content_digest,
+    execution_digest: variant.execution_digest,
+  };
+}
+
+/**
+ * Validate and sort claim.script_variants by ascending priority.
+ * Returns null if any variant is unpinned/invalid (fail-closed: never fetch unpinned releases).
+ */
+export function resolveOrderedScriptVariants(
+  claim: CampaignJobClaim
+): CampaignScriptVariant[] | null {
+  if (!Array.isArray(claim.script_variants) || claim.script_variants.length === 0) {
+    return null;
+  }
+  const validated: CampaignScriptVariant[] = [];
+  for (const raw of claim.script_variants) {
+    const v = resolveVariantScriptPin(raw);
+    if (!v) return null;
+    validated.push(v);
+  }
+  validated.sort((a, b) => a.priority - b.priority);
+  return validated;
 }
 
 /** Exact pin required before Action Script pull. */

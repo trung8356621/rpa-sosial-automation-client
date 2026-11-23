@@ -64,16 +64,36 @@ export class CampaignScriptLoader {
   }
 
   async pullPinned(claim: CampaignJobClaim): Promise<CampaignScriptPullOutcome> {
-    const gap = this.readiness();
-    if (gap) return { kind: "contract_gap", gap };
-
     const pin = resolveClaimScriptPin(claim);
     if (!pin) {
       return { kind: "contract_gap", gap: claimPinGap() };
     }
+    return this.pullPinnedForPin(claim, pin);
+  }
+
+  async pullPinnedForPin(
+    claim: CampaignJobClaim,
+    pin: CampaignScriptPin
+  ): Promise<CampaignScriptPullOutcome> {
+    const gap = this.readiness();
+    if (gap) return { kind: "contract_gap", gap };
+
+    if (!pin.package_key || !pin.version || !pin.release_id || !pin.content_digest || !pin.execution_digest) {
+      return { kind: "contract_gap", gap: claimPinGap() };
+    }
 
     if (this.pullImpl) {
-      const out = await this.pullImpl(claim);
+      const effectiveClaim: CampaignJobClaim = {
+        ...claim,
+        script_id: pin.package_key,
+        package_key: pin.package_key,
+        script_version: pin.version,
+        version: pin.version,
+        release_id: pin.release_id,
+        content_digest: pin.content_digest,
+        execution_digest: pin.execution_digest,
+      };
+      const out = await this.pullImpl(effectiveClaim);
       if (out.kind !== "ok") return out;
       return this.validatePinned(pin, out.release, out.executionContext);
     }

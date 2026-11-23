@@ -21,6 +21,7 @@ export type PersistedAttemptRecord = {
   acknowledgedAt?: string;
   pendingPayload?: CampaignJobResultRequest;
   localScreenshotArtifact?: FailureScreenshotArtifact | null;
+  localScreenshotArtifacts?: FailureScreenshotArtifact[];
   deliveryAttempts: number;
   nextRetryAt?: number;
   lastDeliveryStatus?: number;
@@ -90,6 +91,7 @@ export class JobAttemptIdempotencyStore {
       message: string;
       payload: CampaignJobResultRequest;
       localScreenshotArtifact?: FailureScreenshotArtifact | null;
+      localScreenshotArtifacts?: FailureScreenshotArtifact[];
     }
   ): PersistedAttemptRecord {
     const now = new Date().toISOString();
@@ -109,6 +111,11 @@ export class JobAttemptIdempotencyStore {
         params.localScreenshotArtifact !== undefined
           ? params.localScreenshotArtifact
           : (prev?.localScreenshotArtifact ?? null),
+      ...(params.localScreenshotArtifacts !== undefined
+        ? { localScreenshotArtifacts: params.localScreenshotArtifacts }
+        : prev?.localScreenshotArtifacts !== undefined
+          ? { localScreenshotArtifacts: prev.localScreenshotArtifacts }
+          : {}),
       deliveryAttempts: prev?.deliveryAttempts ?? 0,
       deliveryStopped: false,
     };

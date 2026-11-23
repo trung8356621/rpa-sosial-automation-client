@@ -26,6 +26,14 @@ export type FailureScreenshotArtifact = {
   redacted: boolean;
   captured_at: string;
   error_message?: string;
+  outcome?: "success" | "failed";
+  variant_id?: string;
+  language_label?: string;
+  package_key?: string;
+  release_id?: number;
+  priority?: number;
+  screenshot_role?: string;
+  failed_step?: number | string | null;
 };
 
 export type SensitiveRect = {
@@ -174,11 +182,29 @@ export async function captureAndPersistFailureScreenshot(params: {
   attemptId: string;
   errorCode: string;
   artifactsDir: string;
+  outcome?: "success" | "failed";
+  variantId?: string;
+  languageLabel?: string;
+  packageKey?: string;
+  releaseId?: number;
+  priority?: number;
+  screenshotRole?: string;
+  failedStep?: number | string | null;
   capturePage?: (wc: WebContents) => Promise<Buffer>;
   inspectSensitiveScreen?: (wc: WebContents) => Promise<SensitiveScreenProbe>;
 }): Promise<FailureScreenshotArtifact> {
   const capturedAt = new Date().toISOString();
   const wc = params.webContents;
+  const variantMeta: Partial<FailureScreenshotArtifact> = {
+    ...(params.outcome ? { outcome: params.outcome } : {}),
+    ...(params.variantId ? { variant_id: params.variantId } : {}),
+    ...(params.languageLabel ? { language_label: params.languageLabel } : {}),
+    ...(params.packageKey ? { package_key: params.packageKey } : {}),
+    ...(params.releaseId !== undefined ? { release_id: params.releaseId } : {}),
+    ...(params.priority !== undefined ? { priority: params.priority } : {}),
+    ...(params.screenshotRole ? { screenshot_role: params.screenshotRole } : {}),
+    ...(params.failedStep !== undefined ? { failed_step: params.failedStep } : {}),
+  };
 
   if (!wc || wc.isDestroyed()) {
     return {
@@ -197,6 +223,7 @@ export async function captureAndPersistFailureScreenshot(params: {
       redacted: false,
       captured_at: capturedAt,
       error_message: "WebContents unavailable or destroyed.",
+      ...variantMeta,
     };
   }
 
@@ -233,6 +260,7 @@ export async function captureAndPersistFailureScreenshot(params: {
         redacted: true,
         captured_at: capturedAt,
         error_message: `Suppressed sensitive auth screen (probe failed: ${err instanceof Error ? err.message : String(err)})`,
+        ...variantMeta,
       };
     }
   }
@@ -248,7 +276,13 @@ export async function captureAndPersistFailureScreenshot(params: {
     );
 
     await mkdir(params.artifactsDir, { recursive: true });
-    const fileName = `${sanitizeFilenameSegment(params.jobId)}_${sanitizeFilenameSegment(params.attemptId)}.png`;
+    const baseName = `${sanitizeFilenameSegment(params.jobId)}_${sanitizeFilenameSegment(params.attemptId)}`;
+    const fileName =
+      params.outcome === "success"
+        ? `${baseName}_success.png`
+        : params.variantId
+          ? `${baseName}_v${params.priority ?? 0}_${sanitizeFilenameSegment(params.variantId)}.png`
+          : `${baseName}.png`;
     const localPath = path.join(params.artifactsDir, fileName);
     await writeFile(localPath, finalPng);
 
@@ -268,6 +302,7 @@ export async function captureAndPersistFailureScreenshot(params: {
       url: sanitizedUrl,
       redacted: redacted || Boolean(probe?.isLoginUrl && probe?.hasPasswordField),
       captured_at: capturedAt,
+      ...variantMeta,
     };
   } catch (err) {
     return {
@@ -286,6 +321,7 @@ export async function captureAndPersistFailureScreenshot(params: {
       redacted: false,
       captured_at: capturedAt,
       error_message: err instanceof Error ? err.message : String(err),
+      ...variantMeta,
     };
   }
 }

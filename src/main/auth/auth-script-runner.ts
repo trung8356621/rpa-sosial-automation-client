@@ -34,7 +34,15 @@ export type AuthRunOutcome =
       code: "ASSET_DOWNLOAD_UNAVAILABLE" | "ASSET_INTEGRITY_FAILED" | "ASSET_MISSING";
     }
   | { kind: "viewport_mismatch"; message: string; stepsExecuted: number; stepIndex: number }
-  | { kind: "error"; message: string; stepsExecuted: number };
+  | {
+      kind: "error";
+      message: string;
+      stepsExecuted: number;
+      stepIndex?: number;
+      code?: string;
+      confirmedNotFound?: boolean;
+      mutated?: boolean;
+    };
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const CREATOR_VIEWPORT: Rect = { x: 0, y: 0, width: 1024, height: 560 };
@@ -284,10 +292,20 @@ export class AuthScriptRunner {
             };
           }
           if (out.kind !== "ok") {
+            const mutated =
+              i > 0 || stepsExecuted > 0 || (out.mutated ?? false);
+            const confirmedNotFound =
+              !mutated &&
+              out.kind === "blocked" &&
+              out.confirmedNotFound === true;
             return {
               kind: "error",
               message: `Step ${i}: ${out.message}`,
               stepsExecuted,
+              stepIndex: i,
+              code: out.kind === "blocked" ? out.code : "ORC_ERROR",
+              confirmedNotFound,
+              mutated,
             };
           }
         }
