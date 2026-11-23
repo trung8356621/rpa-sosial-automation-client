@@ -430,25 +430,55 @@ export function resolveSelector(step: AuthScriptStep): string {
   return resolveDomSelector(step);
 }
 
+export const HUMAN_REQUIRED_DETECTION_SCRIPT = `(() => {
+  const text = (document.body && document.body.innerText || '').toLowerCase();
+  const selectors = [
+    '#captcha', '.g-recaptcha', 'iframe[src*="recaptcha"]',
+    '.cf-challenge', '[data-callback*="captcha"]'
+  ];
+  for (const s of selectors) {
+    if (document.querySelector(s)) return 'captcha_or_verification_ui';
+  }
+  const wpAuthCheck = document.querySelector('#wp-auth-check');
+  if (wpAuthCheck) {
+    const wrap = typeof wpAuthCheck.closest === 'function' ? wpAuthCheck.closest('#wp-auth-check-wrap') : null;
+    const wrapStyle = wrap && typeof window !== 'undefined' && typeof window.getComputedStyle === 'function'
+      ? window.getComputedStyle(wrap)
+      : null;
+    const wrapHidden = Boolean(
+      wrap && (
+        wrap.classList?.contains('hidden') ||
+        wrap.hasAttribute?.('hidden') ||
+        wrapStyle?.display === 'none' ||
+        wrapStyle?.visibility === 'hidden'
+      )
+    );
+    const style = typeof window !== 'undefined' && typeof window.getComputedStyle === 'function'
+      ? window.getComputedStyle(wpAuthCheck)
+      : null;
+    const rect = typeof wpAuthCheck.getBoundingClientRect === 'function'
+      ? wpAuthCheck.getBoundingClientRect()
+      : null;
+    const selfHidden = Boolean(
+      wpAuthCheck.classList?.contains('hidden') ||
+      wpAuthCheck.hasAttribute?.('hidden') ||
+      style?.display === 'none' ||
+      style?.visibility === 'hidden' ||
+      (rect && (rect.width <= 0 || rect.height <= 0))
+    );
+    if (!wrapHidden && !selfHidden) {
+      return 'captcha_or_verification_ui';
+    }
+  }
+  if (text.includes('captcha') || text.includes('verify you are human')) {
+    return 'captcha_or_verification_text';
+  }
+  return null;
+})()`;
+
 async function detectHumanRequired(webContents: WebContents): Promise<string | null> {
   try {
-    const hit = await webContents.executeJavaScript(
-      `(() => {
-        const text = (document.body && document.body.innerText || '').toLowerCase();
-        const selectors = [
-          '#captcha', '.g-recaptcha', 'iframe[src*="recaptcha"]',
-          '#wp-auth-check', '.cf-challenge', '[data-callback*="captcha"]'
-        ];
-        for (const s of selectors) {
-          if (document.querySelector(s)) return 'captcha_or_verification_ui';
-        }
-        if (text.includes('captcha') || text.includes('verify you are human')) {
-          return 'captcha_or_verification_text';
-        }
-        return null;
-      })()`,
-      true
-    );
+    const hit = await webContents.executeJavaScript(HUMAN_REQUIRED_DETECTION_SCRIPT, true);
     if (typeof hit === "string" && hit) {
       return `HUMAN_REQUIRED: phát hiện xác minh/CAPTCHA (${hit}) — không bypass.`;
     }

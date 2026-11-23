@@ -669,7 +669,7 @@ export class CampaignJobExecutor {
             eligible: canFallback,
             reason: canFallback ? "first_step_not_found_before_mutation" : fallbackRejectionReason,
             confirmedNotFound: run.kind === "error" ? Boolean(run.confirmedNotFound) : false,
-            mutated: run.kind === "error" ? Boolean(run.mutated) : false,
+            mutated: run.kind === "error" ? Boolean(run.mutated) : run.stepsExecuted > 0,
             stepIndex: run.kind === "error" ? (run.stepIndex ?? null) : null,
             stepsExecuted: run.stepsExecuted,
             failureCode: run.kind === "error" ? (run.code ?? mapped.code) : mapped.code,

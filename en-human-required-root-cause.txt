@@ -1,0 +1,111 @@
+EN HUMAN_REQUIRED ROOT CAUSE EVIDENCE REPORT
+==============================================
+
+1. Job and Attempt Identity
+---------------------------
+- Client instance: client-B
+- Client version: 0.1.0
+- Client build / commit at execution: dc62a2392c780d2b5381af12b8187ccffd9f9a1e
+- Job UUID: 2717fa7d-dcb1-4d42-8158-08333606e3f5
+- Attempt UUID: 8655208c-8930-4f8c-900b-4475cdf3d7d2
+- Target URL: https://maytuicanvas.com/wp-admin/post-new.php
+- Execution timestamps (UTC):
+  - Claimed:       2026-11-23T13:56:49.472Z
+  - VI start:      2026-11-23T13:57:09.932Z
+  - Fallback VI->EN: 2026-11-23T13:57:27.718Z
+  - EN start:      2026-11-23T13:57:28.234Z
+  - EN Step 1 ok:  2026-11-23T13:57:31.471Z
+  - Failure shot:  2026-11-23T13:57:31.667Z
+  - Terminal ack:  2026-11-23T13:57:32.164Z (HTTP 200)
+  - Terminal log:  2026-11-23T13:57:32.165Z
+- Pinned Script Releases:
+  - Variant 1 (VI, priority 1): variantId=03dd0c7c-7701-40af-906c-976f8734ecc8, packageKey=00c6ca04-3d37-4dbf-a4a3-5fc83e9b17a5, releaseId=4, version=1
+  - Variant 2 (EN, priority 2): variantId=b6a8af55-dcf9-425d-98e4-55a4e8687fc5, packageKey=382f26c4-d39a-4f2d-a8a3-d255f6c65c61, releaseId=12, version=1
+- Final Job status: unknown
+- Final error code: HUMAN_REQUIRED
+- Screenshot artifact (EN):
+  D:\workspace-2026\rpa-sosial-automation-client\.local\instances\client-B\artifacts\campaign-jobs\2717fa7d-dcb1-4d42-8158-08333606e3f5_8655208c-8930-4f8c-900b-4475cdf3d7d2_v2_b6a8af55-dcf9-425d-98e4-55a4e8687fc5.png
+  (Visibly shows "TEST Mock Title #5 (maytuicanvas · mock-5-nrf8)" entered in the WordPress Classic Editor title field.)
+
+2. VI -> EN Fallback Evidence (Chronological Log Excerpts)
+----------------------------------------------------------
+[2026-11-23T13:57:09.932Z] [INFO] CAMPAIGN_JOB_EXECUTE_START {"jobId":"2717fa7d-dcb1-4d42-8158-08333606e3f5","attemptId":"8655208c-8930-4f8c-900b-4475cdf3d7d2",...,"scriptId":"00c6ca04-3d37-4dbf-a4a3-5fc83e9b17a5","scriptVersion":"1","releaseId":4,...,"languageLabel":"VI","priority":1}
+[2026-11-23T13:57:27.643Z] [INFO] ORC_STEP_DIAGNOSTIC {"stepId":"a539bbf5-6ece-47d7-9f2e-1333fd151476","action":"CLICK_AND_TYPE",...,"matchResult":"DESTINATION_REACHED","matchReason":"NOT_FOUND: không có ứng viên chữ phù hợp.","finalStepOutcome":"blocked"}
+[2026-11-23T13:57:27.644Z] [INFO] STEP_FAILED {"stepIndex":0,"stepNumber":1,"code":"NOT_FOUND"}
+[2026-11-23T13:57:27.718Z] [INFO] CAMPAIGN_JOB_VARIANT_FALLBACK {"jobId":"2717fa7d-dcb1-4d42-8158-08333606e3f5","attemptId":"8655208c-8930-4f8c-900b-4475cdf3d7d2","fromVariantId":"03dd0c7c-7701-40af-906c-976f8734ecc8","fromLanguage":"VI","fromPackageKey":"00c6ca04-3d37-4dbf-a4a3-5fc83e9b17a5","fromReleaseId":4,"toVariantId":"b6a8af55-dcf9-425d-98e4-55a4e8687fc5","toLanguage":"EN","toPackageKey":"382f26c4-d39a-4f2d-a8a3-d255f6c65c61","toReleaseId":12,"reason":"first_step_not_found_before_mutation"}
+[2026-11-23T13:57:27.718Z] [INFO] CAMPAIGN_JOB_FALLBACK_DECISION {"jobId":"2717fa7d-dcb1-4d42-8158-08333606e3f5","attemptId":"8655208c-8930-4f8c-900b-4475cdf3d7d2","variantId":"03dd0c7c-7701-40af-906c-976f8734ecc8","languageLabel":"VI","eligible":true,"reason":"first_step_not_found_before_mutation","confirmedNotFound":true,"mutated":false,"stepIndex":0,"stepsExecuted":0,"failureCode":"NOT_FOUND"}
+
+3. EN Step 1 Actual Execution Result
+------------------------------------
+[2026-11-23T13:57:28.234Z] [INFO] CAMPAIGN_JOB_EXECUTE_START {"jobId":"2717fa7d-dcb1-4d42-8158-08333606e3f5","attemptId":"8655208c-8930-4f8c-900b-4475cdf3d7d2",...,"scriptId":"382f26c4-d39a-4f2d-a8a3-d255f6c65c61","scriptVersion":"1","releaseId":12,...,"languageLabel":"EN","priority":2}
+[2026-11-23T13:57:28.235Z] [INFO] AUTH_STEP_CLASSIFIED {"packageKey":"382f26c4-d39a-4f2d-a8a3-d255f6c65c61","releaseId":12,"version":"1","steps":[{"stepIndex":0,"id":"8277dc02-284a-45b7-bb63-401881b6b568","action":"click_and_type","kind":"orc_visual","hasCssSelector":false,"hasOcr":true,"hasImageAsset":true,"matchTo":"none",...},{"stepIndex":1,"id":"fc283bb1-3238-41a2-819c-1f4839403f62","action":"click_target","kind":"orc_visual","hasCssSelector":false,"hasOcr":true,"hasImageAsset":true,"matchTo":"middle",...}],...}
+[2026-11-23T13:57:28.271Z] [INFO] AUTH_EXECUTION_STARTED {"packageKey":"382f26c4-d39a-4f2d-a8a3-d255f6c65c61","version":"1","releaseId":12,"stepCount":2,"variableKeys":["title"],"mode":"dom+orc"}
+[2026-11-23T13:57:28.272Z] [INFO] STEP_INPUT_RESOLVED {"stepIndex":0,"action":"click_and_type","variableKey":"title","variablePresent":true,"valueLength":47}
+[2026-11-23T13:57:31.267Z] [INFO] OCR_CANDIDATES {"totalSegments":249,"matchedCandidates":1,"inRegionCandidates":1,"outsideRegionCount":0,"lowConfidenceCount":0,"confidentCount":1,"confirmedCount":0,"rejectionReasons":[]}
+[2026-11-23T13:57:31.267Z] [INFO] OCR_TARGET_ACCEPTED {"stepId":"8277dc02-284a-45b7-bb63-401881b6b568","method":"ocr","score":0.96,"confidence":96}
+[2026-11-23T13:57:31.295Z] [INFO] ORC_CLICK {"stepId":"8277dc02-284a-45b7-bb63-401881b6b568","action":"CLICK_AND_TYPE","method":"ocr","dispatched":true,"hasTextPayload":true}
+[2026-11-23T13:57:31.296Z] [INFO] ORC_STEP_DIAGNOSTIC {"stepId":"8277dc02-284a-45b7-bb63-401881b6b568","action":"CLICK_AND_TYPE",...,"bestOcrConfidence":96,"requiredOcrConfidence":80,"templateMatchConfidence":0.9177448494190575,"selectedMatchingMethod":"ocr",...,"matchResult":"matched","matchReason":"ocr","failureReason":null,"finalStepOutcome":"ok"}
+[2026-11-23T13:57:31.389Z] [INFO] ORC_TYPE {"stepId":"8277dc02-284a-45b7-bb63-401881b6b568","action":"CLICK_AND_TYPE","dispatched":true,"valueLength":47}
+[2026-11-23T13:57:31.471Z] [INFO] AUTH_STEP_COMPLETED {"packageKey":"382f26c4-d39a-4f2d-a8a3-d255f6c65c61","releaseId":12,"version":"1","stepIndex":0,"action":"click_and_type","kind":"orc_visual","stepsExecuted":1}
+
+Result: EN Step 1 (stepIndex 0) succeeded completely (OCR matched at 96% confidence, click and 47-char type dispatched, AUTH_STEP_COMPLETED logged with stepsExecuted=1).
+
+4. EN Step 2 Entry Evidence
+---------------------------
+NONE. Step 2 (stepIndex 1, stepId fc283bb1-3238-41a2-819c-1f4839403f62, action click_target, matchTo middle) was NEVER entered.
+There are zero STEP_INPUT_RESOLVED, OCR_SEARCH_SCOPE, ORC_OCR_START, ORC_STEP_DIAGNOSTIC, or STEP_FAILED events for Step 2.
+
+5. First Error-Producing Event
+------------------------------
+[2026-11-23T13:57:31.668Z] [INFO] CAMPAIGN_JOB_FALLBACK_DECISION {"jobId":"2717fa7d-dcb1-4d42-8158-08333606e3f5","attemptId":"8655208c-8930-4f8c-900b-4475cdf3d7d2","variantId":"b6a8af55-dcf9-425d-98e4-55a4e8687fc5","languageLabel":"EN","eligible":false,"reason":"no_next_variant","confirmedNotFound":false,"mutated":false,"stepIndex":null,"stepsExecuted":1,"failureCode":"HUMAN_REQUIRED"}
+[2026-11-23T13:57:31.667Z] [INFO] CAMPAIGN_JOB_FAILURE_SCREENSHOT {"jobId":"2717fa7d-dcb1-4d42-8158-08333606e3f5","attemptId":"8655208c-8930-4f8c-900b-4475cdf3d7d2","errorCode":"HUMAN_REQUIRED","captureStatus":"captured",...,"variantId":"b6a8af55-dcf9-425d-98e4-55a4e8687fc5","languageLabel":"EN"}
+[2026-11-23T13:57:32.165Z] [INFO] CAMPAIGN_JOB_TERMINAL {"jobId":"2717fa7d-dcb1-4d42-8158-08333606e3f5","attemptId":"8655208c-8930-4f8c-900b-4475cdf3d7d2","status":"unknown","code":"HUMAN_REQUIRED","reported":true,"idempotent":false,"usedFallbackWithoutArtifacts":false,"stepsExecuted":1,"draftVerified":false,"screenshotCaptureStatus":"captured","screenshotCount":2,"screenshotUploadStatus":"metadata_reported"}
+
+6. Raw Internal Failure Code & Reason
+-------------------------------------
+From campaign-job-attempts.json (Job 2717fa7d-dcb1-4d42-8158-08333606e3f5):
+- AuthScriptRunner outcome: { kind: "human_required", stepsExecuted: 1 }
+- Raw internal hit from detectHumanRequired(webContents) in src/main/auth/auth-script-runner.ts:
+  "captcha_or_verification_ui"
+- Error message:
+  "HUMAN_REQUIRED: phát hiện xác minh/CAPTCHA (captcha_or_verification_ui) — không bypass."
+
+7. Final Mapped Error Code
+--------------------------
+- CampaignJobExecutor mapRunOutcome({ kind: "human_required", ... }):
+  status: "unknown"
+  code: "HUMAN_REQUIRED"
+
+8. Mutation and Execution Counters
+----------------------------------
+- stepsExecuted: 1 (EN Step 1 completed; title input visibly populated in WordPress)
+- failed_step (artifact metadata): "HUMAN_REQUIRED" (post-step check between Step 1 and Step 2)
+- Backend result payload (campaign-job-attempts.json):
+  - status: "unknown"
+  - output.code: "HUMAN_REQUIRED"
+  - output.steps_executed: 1
+  - output.attempted_variants:
+    - VI (release 4, priority 1): outcome="failed", code="ORC_ERROR", steps_executed=0
+    - EN (release 12, priority 2): outcome="unknown", code="HUMAN_REQUIRED", steps_executed=1
+- Telemetry bug observed in CAMPAIGN_JOB_FALLBACK_DECISION:
+  - Logged "mutated": false even though stepsExecuted=1, because CampaignJobExecutor only checked run.mutated when run.kind === "error" instead of checking run.stepsExecuted > 0 for non-"error" outcomes.
+
+9. Pinned Release and Target Configuration
+------------------------------------------
+- EN Release 12 (packageKey 382f26c4-d39a-4f2d-a8a3-d255f6c65c61, version 1) is pulled in memory via /api/v1/social-automation/client/scripts/pull (manifest is not persisted to disk).
+- From AUTH_STEP_CLASSIFIED (client.log line 983):
+  - Step 1 (stepIndex 0): id=8277dc02-284a-45b7-bb63-401881b6b568, action=click_and_type, kind=orc_visual, hasOcr=true, hasImageAsset=true, matchTo=none
+  - Step 2 (stepIndex 1): id=fc283bb1-3238-41a2-819c-1f4839403f62, action=click_target, kind=orc_visual, hasOcr=true, hasImageAsset=true, matchTo=middle
+- Because execution aborted in detectHumanRequired() right after Step 1, Step 2 configuration was not involved in the HUMAN_REQUIRED failure.
+
+10. Proven Root Cause and Recommended Correction
+------------------------------------------------
+- Root Cause (Electron Runtime Defect):
+  In src/main/auth/auth-script-runner.ts, AuthScriptRunner.run() calls detectHumanRequired(webContents) after every completed step (line 384).
+  detectHumanRequired() ran `document.querySelector('#wp-auth-check')` without checking visibility.
+  WordPress wp-admin pages (including /wp-admin/post-new.php) ALWAYS render `<div id="wp-auth-check-wrap" class="hidden"><div id="wp-auth-check">...</div></div>` in the footer even when the user is logged in and no interim login modal is visible.
+  Earlier failed runs (VI Release 4) failed on Step 0 before AUTH_STEP_COMPLETED, so detectHumanRequired() never ran. As soon as EN Step 1 succeeded, detectHumanRequired() ran for the first time, matched the hidden `#wp-auth-check` element, and immediately aborted the job with `HUMAN_REQUIRED (captcha_or_verification_ui)` before Step 2 could start.
+- Correction Implemented:
+  1. Updated `detectHumanRequired` / `HUMAN_REQUIRED_DETECTION_SCRIPT` in src/main/auth/auth-script-runner.ts so `#wp-auth-check` only triggers `captcha_or_verification_ui` when it (and `#wp-auth-check-wrap`) is actually visible (not `.hidden`, not `[hidden]`, not `display: none` / `visibility: hidden`, and non-zero bounding rect), while keeping all CAPTCHA selectors and text checks intact.
+  2. Updated `CAMPAIGN_JOB_FALLBACK_DECISION` in src/main/jobs/campaign-job-executor.ts so `mutated` is `true` when `stepsExecuted > 0` for non-`"error"` outcomes (such as `human_required`).
+  3. Added regression tests in tests/auth-human-required-wp-auth-check.test.ts.
