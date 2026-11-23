@@ -7,6 +7,7 @@ import {
   formatFallbackTransitionStatus,
   formatStepFailedStatus,
   formatStepPhaseStatus,
+  resolveExecutionLanguageLabel,
 } from "../../shared/execution-status.js";
 import type { AccountCredentialSource } from "../auth/credential-mapper.js";
 import type { ExecutionViewportVerification } from "../browser/embedded-browser.js";
@@ -341,6 +342,7 @@ export class CampaignJobExecutor {
       let hostLocked = false;
       let viewportVerification: ExecutionViewportVerification | null | undefined;
       let fallbackFromLanguage: string | null = null;
+      let pendingFallbackTransitionFrom: string | null = null;
       let lastFailureStatus: ExecutionStatus | null = null;
 
       for (let idx = 0; idx < variantsToExecute.length; idx++) {
@@ -579,22 +581,25 @@ export class CampaignJobExecutor {
           inputValues: bindings.values,
           onProgress: (ev) => {
             if (ev.kind === "step_phase") {
+              const transitionFrom = pendingFallbackTransitionFrom;
+              pendingFallbackTransitionFrom = null;
               this.host.updateExecutionStatus?.(
                 formatStepPhaseStatus({
                   stepNumber: ev.stepNumber,
                   totalSteps: ev.totalSteps,
                   phase: ev.phase,
                   activeLanguage: variant?.language_label ?? null,
+                  transitionFromLanguage: transitionFrom,
                   isFallback: Boolean(fallbackFromLanguage),
                 })
               );
             } else if (ev.kind === "step_failed") {
+              pendingFallbackTransitionFrom = null;
               lastFailureStatus = formatStepFailedStatus({
                 stepNumber: ev.stepNumber,
                 totalSteps: ev.totalSteps,
                 code: ev.code,
                 activeLanguage: variant?.language_label ?? null,
-                isFallback: Boolean(fallbackFromLanguage),
               });
               this.host.updateExecutionStatus?.(lastFailureStatus);
             }
@@ -641,6 +646,7 @@ export class CampaignJobExecutor {
           if (canFallback && variant) {
             const nextVariant = variantsToExecute[idx + 1].variant!;
             fallbackFromLanguage = variant.language_label;
+            pendingFallbackTransitionFrom = variant.language_label;
             lastFailureStatus = null;
             logClientEvent("CAMPAIGN_JOB_VARIANT_FALLBACK", {
               jobId: claim.job_id,
@@ -662,7 +668,7 @@ export class CampaignJobExecutor {
             this.host.updateExecutionStatus?.(null);
           } else if (!lastFailureStatus) {
             this.host.updateExecutionStatus?.({
-              text: `Failed: ${mapped.code}`,
+              text: `${resolveExecutionLanguageLabel(variant?.language_label ?? null)} · Failed: ${mapped.code}`,
               tone: "failed",
             });
           }
@@ -682,7 +688,7 @@ export class CampaignJobExecutor {
         });
         if (!draft.verified) {
           this.host.updateExecutionStatus?.({
-            text: "Failed: DRAFT_NOT_VERIFIED",
+            text: `${resolveExecutionLanguageLabel(variant?.language_label ?? null)} · Failed: DRAFT_NOT_VERIFIED`,
             tone: "failed",
           });
           if (variant) {

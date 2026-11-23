@@ -90,3 +90,13 @@ export function formatAuthStatusDisplay(
     detail: message || code,
   };
 }
+
+/**
+ * Only critical authentication errors requiring operator intervention
+ * should be surfaced as a banner in the Browser workspace.
+ */
+export function shouldDisplayAuthStatusInBrowserWorkspace(
+  display: AuthStatusDisplay | null
+): boolean {
+  return Boolean(display && display.tone === "error");
+}

@@ -17,6 +17,10 @@ import { JobAttemptIdempotencyStore } from "../src/main/jobs/idempotency.js";
 import { OrcBrowserHost } from "../src/main/orc/browser-host.js";
 import type { OcrEngine } from "../src/main/orc/ocr.js";
 import { VisualOrcExecutor } from "../src/main/orc/visual-executor.js";
+import {
+  formatAuthStatusDisplay,
+  shouldDisplayAuthStatusInBrowserWorkspace,
+} from "../src/shared/auth-status.js";
 import type { ExecutionStatus } from "../src/shared/contracts.js";
 
 const VI_CONTENT_DIGEST = "1".repeat(64);
@@ -363,8 +367,8 @@ test("2. Step 0 OCR error does not execute subsequent steps and SCROLL_CONTAINER
     assert.deepEqual(
       nonNullStatuses.map((s) => s.text),
       [
-        "Step 1/2 — OCR",
-        "Step 1/2 — Failed: SCROLL_CONTAINER_CHANGED",
+        "VI · Step 1/2 — OCR",
+        "VI · Step 1/2 — Failed: SCROLL_CONTAINER_CHANGED",
       ]
     );
     assert.equal(statuses.at(-1)?.tone, "failed", "Final failure status must be preserved");
@@ -452,10 +456,10 @@ test("3. Confirmed first-step NOT_FOUND triggers eligible language fallback and 
 
     const texts = statuses.filter((s): s is ExecutionStatus => s !== null).map((s) => s.text);
     assert.deepEqual(texts, [
-      "Step 1/4 — OCR",
-      "Step 1/4 — Failed: NOT_FOUND",
-      "Fallback VI → EN — Step 1/4",
-      "EN · Step 1/4 — OCR",
+      "VI · Step 1/4 — OCR",
+      "VI · Step 1/4 — Failed: NOT_FOUND",
+      "VI → EN · Step 1/4",
+      "VI → EN · Step 1/4 — OCR",
       "EN · Step 1/4 — Click",
       "EN · Step 2/4 — Type",
     ]);
@@ -599,4 +603,88 @@ test("5. Real AuthScriptRunner does not advance past Step 0 when Step 0 fails an
   assert.equal(out.stepsExecuted, 0);
   assert.equal(step1Executed.length, 0, "Step 1 must never execute when Step 0 fails");
   assert.deepEqual(events, [{ kind: "step_phase", stepNumber: 1, totalSteps: 2, phase: "DOM" }]);
+});
+
+test("6. Legacy script without language metadata displays Default instead of inferring from script name", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "rpa-reg-6-"));
+  try {
+    const wc = makeFakeWebContents();
+    const statuses: Array<ExecutionStatus | null> = [];
+    const host = makeFakeHost(wc, statuses);
+    const { api } = makeFakeApi();
+
+    const fakeRunner = {
+      run: async (params: {
+        release: { manifest: { steps: unknown[] } };
+        onProgress?: (ev: { kind: "step_phase"; stepNumber: number; totalSteps: number; phase: "OCR" } | { kind: "step_failed"; stepNumber: number; totalSteps: number; code: string }) => void;
+      }): Promise<AuthRunOutcome> => {
+        const total = params.release.manifest.steps.length;
+        params.onProgress?.({ kind: "step_phase", stepNumber: 1, totalSteps: total, phase: "OCR" });
+        params.onProgress?.({ kind: "step_failed", stepNumber: 1, totalSteps: total, code: "NOT_FOUND" });
+        return {
+          kind: "error",
+          message: "Step 0: NOT_FOUND",
+          stepsExecuted: 0,
+          stepIndex: 0,
+          code: "NOT_FOUND",
+          confirmedNotFound: true,
+          mutated: false,
+        };
+      },
+    } as unknown as AuthScriptRunner;
+
+    const legacyRelease = {
+      package_key: "wp_vi_create_post",
+      release_id: 4,
+      version: "4",
+      manifest: { steps: [{ id: "v0", action: "click" }, { id: "v1", action: "type" }], variables: [], assets: [] },
+    };
+
+    const legacyClaim = makeClaim({
+      job_id: "job-reg-6",
+      attempt_id: "att-reg-6",
+      script_variants: undefined,
+      variant_group_id: undefined,
+    });
+
+    const executor = new CampaignJobExecutor(
+      api,
+      makeFakeScriptLoader({ wp_vi_create_post: legacyRelease }),
+      host,
+      fakeRunner,
+      new JobAttemptIdempotencyStore(path.join(dir, "idemp.json"))
+    );
+
+    const out = await executor.execute(legacyClaim);
+    assert.equal(out.status, "failed");
+    const texts = statuses.filter((s): s is ExecutionStatus => s !== null).map((s) => s.text);
+    assert.deepEqual(texts, [
+      "Default · Step 1/2 — OCR",
+      "Default · Step 1/2 — Failed: NOT_FOUND",
+    ]);
+    assert.equal(statuses.at(-1)?.tone, "failed");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("7. Browser workspace hides non-critical auth banners (SESSION_VALID) while preserving critical auth errors", () => {
+  const sessionValid = formatAuthStatusDisplay("SESSION_VALID", null, "Session/Checkpoint hợp lệ");
+  assert.equal(sessionValid?.label, "Authentication not required");
+  assert.equal(shouldDisplayAuthStatusInBrowserWorkspace(sessionValid), false);
+
+  const authNotRequired = formatAuthStatusDisplay("AUTH_NOT_REQUIRED");
+  assert.equal(shouldDisplayAuthStatusInBrowserWorkspace(authNotRequired), false);
+
+  const checkpointPassed = formatAuthStatusDisplay("CHECKPOINT_PASSED", "cms_global");
+  assert.equal(shouldDisplayAuthStatusInBrowserWorkspace(checkpointPassed), false);
+
+  const noTagContext = formatAuthStatusDisplay("NO_TAG_CONTEXT");
+  assert.equal(shouldDisplayAuthStatusInBrowserWorkspace(noTagContext), false);
+
+  const authFailed = formatAuthStatusDisplay("AUTH_EXECUTION_FAILED", "site_specific", "Login failed");
+  assert.equal(shouldDisplayAuthStatusInBrowserWorkspace(authFailed), true);
+
+  const humanRequired = formatAuthStatusDisplay("HUMAN_REQUIRED", null, "2FA required");
+  assert.equal(shouldDisplayAuthStatusInBrowserWorkspace(humanRequired), true);
 });

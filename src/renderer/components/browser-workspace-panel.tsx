@@ -1,5 +1,8 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import { formatAuthStatusDisplay } from "../../shared/auth-status";
+import {
+  formatAuthStatusDisplay,
+  shouldDisplayAuthStatusInBrowserWorkspace,
+} from "../../shared/auth-status";
 import {
   type BrowserProfile,
   type BrowserStateSnapshot,
@@ -452,7 +455,7 @@ export function BrowserWorkspacePanel({
           viewState?.lastAuthResolutionSource,
           viewState?.lastAuthMessage
         );
-        if (!authDisplay) return null;
+        if (!authDisplay || !shouldDisplayAuthStatusInBrowserWorkspace(authDisplay)) return null;
         return (
           <div
             className="browser-error-banner"
