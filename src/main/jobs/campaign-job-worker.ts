@@ -150,6 +150,8 @@ export class CampaignJobWorker {
         scriptVersion: claimed.data.script_version,
         runMode: claimed.data.run_mode,
         variantGroupId: claimed.data.variant_group_id ?? null,
+        preferredVariantId: claimed.data.preferred_variant_id ?? null,
+        preferredLanguageLabel: claimed.data.preferred_language_label ?? null,
         scriptVariants: Array.isArray(claimed.data.script_variants)
           ? claimed.data.script_variants.map((v) => ({
               variantId: v.variant_id ?? null,

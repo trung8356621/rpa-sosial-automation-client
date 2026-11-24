@@ -20,7 +20,7 @@ import { CampaignScriptLoader, type CampaignScriptPullOutcome } from "./campaign
 import {
   doesSiteKeyMatchSiteUrl,
   resolveClaimScriptPin,
-  resolveOrderedScriptVariants,
+  resolveScriptVariantsWithPreference,
   variantToScriptPin,
   type CampaignJobClaim,
   type CampaignJobResultRequest,
@@ -195,7 +195,8 @@ export class CampaignJobExecutor {
     }
 
     const hasVariantsField = Array.isArray(claim.script_variants) && claim.script_variants.length > 0;
-    const orderedVariants = hasVariantsField ? resolveOrderedScriptVariants(claim) : null;
+    const resolvedVariants = hasVariantsField ? resolveScriptVariantsWithPreference(claim) : null;
+    const orderedVariants = resolvedVariants?.variants ?? null;
     if (hasVariantsField && !orderedVariants) {
       logClientEvent("CAMPAIGN_JOB_CONTRACT_GAP", {
         jobId: claim.job_id,
@@ -209,6 +210,21 @@ export class CampaignJobExecutor {
         message: "script_variants chứa variant chưa pin đầy đủ (release_id + package_key + script_version + content_digest + execution_digest).",
         stepsExecuted: 0,
       };
+    }
+    if (resolvedVariants && orderedVariants) {
+      logClientEvent("CAMPAIGN_JOB_VARIANT_ORDER", {
+        jobId: claim.job_id,
+        attemptId: claim.attempt_id,
+        variantGroupId: claim.variant_group_id ?? null,
+        preferredReceived: resolvedVariants.preference.provided,
+        preferredMatched: resolvedVariants.preference.matched,
+        preferredReason: resolvedVariants.preference.reason,
+        preferredVariantId: resolvedVariants.preference.preferredVariantId,
+        preferredLanguageLabel: resolvedVariants.preference.preferredLanguageLabel,
+        firstVariantId: orderedVariants[0]?.variant_id ?? null,
+        firstLanguageLabel: orderedVariants[0]?.language_label ?? null,
+        orderedLanguages: orderedVariants.map((v) => v.language_label),
+      });
     }
 
     const legacyPin = !hasVariantsField ? resolveClaimScriptPin(claim) : null;
@@ -816,6 +832,7 @@ export class CampaignJobExecutor {
           output: {
             draft,
             script_id: pull.pinned.package_key,
+            package_key: pull.pinned.package_key,
             script_version: pull.pinned.version,
             release_id: pull.pinned.release_id,
             content_digest: pull.pinned.content_digest,
@@ -1153,6 +1170,11 @@ export class CampaignJobExecutor {
       usedFallbackWithoutArtifacts: delivery.usedFallback,
       stepsExecuted: extra.stepsExecuted,
       draftVerified: extra.draftVerified ?? false,
+      successfulVariantId: extra.selectedVariant?.variant_id ?? null,
+      successfulLanguageLabel: extra.selectedVariant?.language_label ?? null,
+      successfulPackageKey: extra.selectedVariant?.package_key ?? null,
+      successfulReleaseId: extra.selectedVariant?.release_id ?? null,
+      fallbackAttempted: (extra.attemptedVariants?.length ?? 0) > 1,
       screenshotCaptureStatus: primaryScreenshot?.status ?? null,
       screenshotCount: screenshots.length,
       screenshotUploadStatus: terminalUploadStatus,

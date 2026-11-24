@@ -47,6 +47,13 @@ export type CampaignFallbackPolicy = {
   failure_screenshots_per_attempted_variant: number;
 };
 
+export type CampaignPreferredVariant = {
+  variant_id?: string;
+  language_label?: string;
+  package_key?: string;
+  release_id?: number;
+};
+
 /**
  * Claim payload. Exact script pin fields are required before pull/execute:
  * package_key (=script_id), version, release_id, content_digest, execution_digest.
@@ -84,6 +91,9 @@ export type CampaignJobClaim = {
   variant_group_id?: string;
   script_variants?: CampaignScriptVariantCandidate[];
   fallback_policy?: CampaignFallbackPolicy;
+  preferred_variant_id?: string;
+  preferred_language_label?: string;
+  preferred_variant?: CampaignPreferredVariant | string;
 };
 
 export type CampaignJobAckRequest = {
@@ -190,6 +200,21 @@ export function parseCampaignJobClaim(raw: unknown): CampaignJobClaim | null {
       : {};
   const script_variants = parseScriptVariants(r.script_variants);
   const fallback_policy = parseFallbackPolicy(r.fallback_policy);
+  const policyObj =
+    r.fallback_policy && typeof r.fallback_policy === "object" && !Array.isArray(r.fallback_policy)
+      ? (r.fallback_policy as Record<string, unknown>)
+      : null;
+  const preferred_variant_id =
+    str(r.preferred_variant_id) || str(policyObj?.preferred_variant_id) || undefined;
+  const preferred_language_label =
+    str(r.preferred_language_label) ||
+    str(r.preferred_language) ||
+    str(policyObj?.preferred_language_label) ||
+    str(policyObj?.preferred_language) ||
+    undefined;
+  const preferred_variant = parsePreferredVariant(
+    r.preferred_variant ?? r.variant_preference ?? policyObj?.preferred_variant ?? policyObj?.variant_preference
+  );
   return {
     plan_version: posInt(r.plan_version),
     plan_tag_id: posInt(r.plan_tag_id),
@@ -218,6 +243,9 @@ export function parseCampaignJobClaim(raw: unknown): CampaignJobClaim | null {
     variant_group_id: str(r.variant_group_id) || undefined,
     ...(script_variants ? { script_variants } : {}),
     ...(fallback_policy ? { fallback_policy } : {}),
+    ...(preferred_variant_id ? { preferred_variant_id } : {}),
+    ...(preferred_language_label ? { preferred_language_label } : {}),
+    ...(preferred_variant !== undefined ? { preferred_variant } : {}),
   };
 }
 
@@ -264,6 +292,32 @@ function parseFallbackPolicy(raw: unknown): CampaignFallbackPolicy | undefined {
     success_screenshots: posInt(p.success_screenshots) ?? 1,
     failure_screenshots_per_attempted_variant:
       posInt(p.failure_screenshots_per_attempted_variant) ?? 1,
+  };
+}
+
+function parsePreferredVariant(raw: unknown): CampaignPreferredVariant | string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw === "string") {
+    const s = raw.trim();
+    return s || undefined;
+  }
+  if (typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const p = raw as Record<string, unknown>;
+  if (p.release_id !== undefined && p.release_id !== null && !posInt(p.release_id)) {
+    return undefined;
+  }
+  const variant_id = str(p.variant_id) || undefined;
+  const language_label = str(p.language_label) || str(p.language) || undefined;
+  const package_key = str(p.package_key) || str(p.script_id) || undefined;
+  const release_id = posInt(p.release_id);
+  if (!variant_id && !language_label && !package_key && release_id === undefined) {
+    return undefined;
+  }
+  return {
+    ...(variant_id ? { variant_id } : {}),
+    ...(language_label ? { language_label } : {}),
+    ...(package_key ? { package_key } : {}),
+    ...(release_id !== undefined ? { release_id } : {}),
   };
 }
 
@@ -317,13 +371,25 @@ export function variantToScriptPin(variant: CampaignScriptVariant): CampaignScri
   };
 }
 
+export type ResolvedScriptVariantsResult = {
+  variants: CampaignScriptVariant[];
+  preference: {
+    provided: boolean;
+    matched: boolean;
+    reason: string;
+    preferredVariantId: string | null;
+    preferredLanguageLabel: string | null;
+  };
+};
+
 /**
- * Validate and sort claim.script_variants by ascending priority.
+ * Validate and sort claim.script_variants by ascending priority, then apply
+ * Backend's preferred variant (if provided and matching a pinned, compatible candidate).
  * Returns null if any variant is unpinned/invalid (fail-closed: never fetch unpinned releases).
  */
-export function resolveOrderedScriptVariants(
+export function resolveScriptVariantsWithPreference(
   claim: CampaignJobClaim
-): CampaignScriptVariant[] | null {
+): ResolvedScriptVariantsResult | null {
   if (!Array.isArray(claim.script_variants) || claim.script_variants.length === 0) {
     return null;
   }
@@ -334,7 +400,89 @@ export function resolveOrderedScriptVariants(
     validated.push(v);
   }
   validated.sort((a, b) => a.priority - b.priority);
-  return validated;
+
+  const prefObj =
+    claim.preferred_variant && typeof claim.preferred_variant === "object"
+      ? claim.preferred_variant
+      : null;
+  const prefString =
+    typeof claim.preferred_variant === "string" ? str(claim.preferred_variant) : "";
+  const prefVariantId = str(claim.preferred_variant_id) || str(prefObj?.variant_id);
+  const prefLang = str(claim.preferred_language_label) || str(prefObj?.language_label);
+  const prefPkgKey = str(prefObj?.package_key);
+  const prefReleaseId = prefObj?.release_id;
+
+  const hasPreference = Boolean(
+    prefVariantId || prefLang || prefPkgKey || prefReleaseId !== undefined || prefString
+  );
+  if (!hasPreference) {
+    return {
+      variants: validated,
+      preference: {
+        provided: false,
+        matched: false,
+        reason: "none",
+        preferredVariantId: null,
+        preferredLanguageLabel: null,
+      },
+    };
+  }
+
+  const matchedIdx = validated.findIndex((v) => {
+    if (prefVariantId && v.variant_id !== prefVariantId) return false;
+    if (prefLang && v.language_label.toUpperCase() !== prefLang.toUpperCase()) return false;
+    if (prefPkgKey && v.package_key !== prefPkgKey) return false;
+    if (prefReleaseId !== undefined && v.release_id !== prefReleaseId) return false;
+    if (prefString && !prefVariantId && !prefLang) {
+      const matchesId = v.variant_id === prefString;
+      const matchesLang = v.language_label.toUpperCase() === prefString.toUpperCase();
+      if (!matchesId && !matchesLang) return false;
+    }
+    return true;
+  });
+
+  if (matchedIdx < 0) {
+    return {
+      variants: validated,
+      preference: {
+        provided: true,
+        matched: false,
+        reason: "no_compatible_pinned_candidate",
+        preferredVariantId: prefVariantId || null,
+        preferredLanguageLabel: prefLang || prefString || null,
+      },
+    };
+  }
+
+  const ordered =
+    matchedIdx === 0
+      ? validated
+      : [
+          validated[matchedIdx],
+          ...validated.slice(0, matchedIdx),
+          ...validated.slice(matchedIdx + 1),
+        ];
+
+  return {
+    variants: ordered,
+    preference: {
+      provided: true,
+      matched: true,
+      reason: matchedIdx === 0 ? "already_first" : "promoted_to_first",
+      preferredVariantId: ordered[0].variant_id,
+      preferredLanguageLabel: ordered[0].language_label,
+    },
+  };
+}
+
+/**
+ * Validate and sort claim.script_variants by ascending priority (honoring preferred variant).
+ * Returns null if any variant is unpinned/invalid (fail-closed: never fetch unpinned releases).
+ */
+export function resolveOrderedScriptVariants(
+  claim: CampaignJobClaim
+): CampaignScriptVariant[] | null {
+  return resolveScriptVariantsWithPreference(claim)?.variants ?? null;
 }
 
 /** Exact pin required before Action Script pull. */
