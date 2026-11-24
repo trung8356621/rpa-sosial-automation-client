@@ -159,9 +159,7 @@ test("matchTo=none still throws OcrNotFound when target is absent from full view
   );
 });
 
-test("focused input box recovers via inset OCR when full-viewport OCR returns no candidates", async () => {
-  // Build a template with a distinct border and a frame where the same box at y=329
-  // has a slightly darker focused border (so template score >= 0.85 but < 0.96).
+async function makeFocusedBoxImages(duplicateBox = false) {
   const template = await sharp({
     create: { width: 507, height: 41, channels: 3, background: { r: 255, g: 255, b: 255 } },
   })
@@ -194,37 +192,49 @@ test("focused input box recovers via inset OCR when full-viewport OCR returns no
     .png()
     .toBuffer();
 
+  const boxParts = async (topY: number) => [
+    {
+      input: await sharp({
+        create: { width: 507, height: 3, channels: 3, background: { r: 0, g: 90, b: 135 } },
+      }).png().toBuffer(),
+      left: 181, top: topY,
+    },
+    {
+      input: await sharp({
+        create: { width: 507, height: 3, channels: 3, background: { r: 0, g: 90, b: 135 } },
+      }).png().toBuffer(),
+      left: 181, top: topY + 38,
+    },
+    {
+      input: await sharp({
+        create: { width: 3, height: 41, channels: 3, background: { r: 0, g: 90, b: 135 } },
+      }).png().toBuffer(),
+      left: 181, top: topY,
+    },
+    {
+      input: await sharp({
+        create: { width: 83, height: 14, channels: 3, background: { r: 120, g: 120, b: 120 } },
+      }).png().toBuffer(),
+      left: 192, top: topY + 13,
+    },
+  ];
+
+  const overlays = [...(await boxParts(329))];
+  if (duplicateBox) {
+    overlays.push(...(await boxParts(420)));
+  }
   const frame = await sharp({
     create: { width: 1024, height: 560, channels: 3, background: { r: 255, g: 255, b: 255 } },
   })
-    .composite([
-      {
-        input: await sharp({
-          create: { width: 507, height: 3, channels: 3, background: { r: 0, g: 90, b: 135 } },
-        }).png().toBuffer(),
-        left: 181, top: 329,
-      },
-      {
-        input: await sharp({
-          create: { width: 507, height: 3, channels: 3, background: { r: 0, g: 90, b: 135 } },
-        }).png().toBuffer(),
-        left: 181, top: 367,
-      },
-      {
-        input: await sharp({
-          create: { width: 3, height: 41, channels: 3, background: { r: 0, g: 90, b: 135 } },
-        }).png().toBuffer(),
-        left: 181, top: 329,
-      },
-      {
-        input: await sharp({
-          create: { width: 83, height: 14, channels: 3, background: { r: 120, g: 120, b: 120 } },
-        }).png().toBuffer(),
-        left: 192, top: 342,
-      },
-    ])
+    .composite(overlays)
     .png()
     .toBuffer();
+
+  return { frame, template };
+}
+
+test("focused input box recovers via inset OCR when full-viewport OCR returns no candidates", async () => {
+  const { frame, template } = await makeFocusedBoxImages();
 
   const ocrCalls: Array<{ width?: number; height?: number }> = [];
   const fakeOcr: OcrEngine = {
@@ -259,4 +269,70 @@ test("focused input box recovers via inset OCR when full-viewport OCR returns no
   assert.ok(Math.abs(resolved.x - (181 + 5 + 6 + 83 / 2)) <= 1);
   assert.ok(Math.abs(resolved.y - (329 + 5 + 6 + 18 / 2)) <= 1);
   assert.ok(ocrCalls.some((c) => (c.height ?? 0) <= 35 && (c.width ?? 0) <= 500));
+});
+
+test("inset OCR proposal >= 0.85 never authorizes a click when OCR text mismatches or is low confidence", async () => {
+  const { frame, template } = await makeFocusedBoxImages();
+  for (const insetSegment of [
+    { id: "vi", kind: "line" as const, text: "Thêm tiêu đề", confidence: 95, bbox: { x: 6, y: 6, width: 110, height: 18 } },
+    { id: "low", kind: "line" as const, text: "Add title", confidence: 79, bbox: { x: 6, y: 6, width: 83, height: 18 } },
+  ]) {
+    const fakeOcr: OcrEngine = {
+      async recognize(image) {
+        const meta = await sharp(image).metadata();
+        if ((meta.height ?? 0) <= 35 && (meta.width ?? 0) <= 500) {
+          return { text: insetSegment.text, confidence: insetSegment.confidence, language: "vie+eng", segments: [insetSegment] };
+        }
+        return { text: "", confidence: 0, language: "vie+eng", segments: [] };
+      },
+    };
+    await assert.rejects(
+      () => resolveVisualTarget(frame, template, makeEnTitlePayload(), fakeOcr),
+      (err: unknown) => err instanceof OcrNotFound && err.outcome === "NOT_FOUND",
+    );
+  }
+});
+
+test("ambiguous template match never triggers inset OCR or authorizes a click", async () => {
+  const { frame, template } = await makeFocusedBoxImages(true);
+  let insetOcrCalled = false;
+  const fakeOcr: OcrEngine = {
+    async recognize(image) {
+      const meta = await sharp(image).metadata();
+      if ((meta.height ?? 0) <= 35 && (meta.width ?? 0) <= 500) {
+        insetOcrCalled = true;
+      }
+      return { text: "", confidence: 0, language: "vie+eng", segments: [] };
+    },
+  };
+  await assert.rejects(
+    () => resolveVisualTarget(frame, template, makeEnTitlePayload(), fakeOcr),
+    (err: unknown) => err instanceof OcrNotFound && err.outcome === "NOT_FOUND",
+  );
+  assert.equal(insetOcrCalled, false);
+});
+
+test("multiple matching OCR lines inside inset crop reject with NOT_FOUND", async () => {
+  const { frame, template } = await makeFocusedBoxImages();
+  const fakeOcr: OcrEngine = {
+    async recognize(image) {
+      const meta = await sharp(image).metadata();
+      if ((meta.height ?? 0) <= 35 && (meta.width ?? 0) <= 500) {
+        return {
+          text: "Add title\nAdd title",
+          confidence: 95,
+          language: "vie+eng",
+          segments: [
+            { id: "t1", kind: "line", text: "Add title", confidence: 95, bbox: { x: 6, y: 2, width: 83, height: 12 } },
+            { id: "t2", kind: "line", text: "Add title", confidence: 94, bbox: { x: 6, y: 16, width: 83, height: 12 } },
+          ],
+        };
+      }
+      return { text: "", confidence: 0, language: "vie+eng", segments: [] };
+    },
+  };
+  await assert.rejects(
+    () => resolveVisualTarget(frame, template, makeEnTitlePayload(), fakeOcr),
+    (err: unknown) => err instanceof OcrNotFound && err.outcome === "NOT_FOUND",
+  );
 });
