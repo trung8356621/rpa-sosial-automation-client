@@ -158,3 +158,105 @@ test("matchTo=none still throws OcrNotFound when target is absent from full view
     (err: unknown) => err instanceof TargetNotConfident && (err instanceof OcrNotFound || err.resolution?.ocrOutcome === "NOT_FOUND"),
   );
 });
+
+test("focused input box recovers via inset OCR when full-viewport OCR returns no candidates", async () => {
+  // Build a template with a distinct border and a frame where the same box at y=329
+  // has a slightly darker focused border (so template score >= 0.85 but < 0.96).
+  const template = await sharp({
+    create: { width: 507, height: 41, channels: 3, background: { r: 255, g: 255, b: 255 } },
+  })
+    .composite([
+      {
+        input: await sharp({
+          create: { width: 507, height: 2, channels: 3, background: { r: 140, g: 140, b: 140 } },
+        }).png().toBuffer(),
+        left: 0, top: 0,
+      },
+      {
+        input: await sharp({
+          create: { width: 507, height: 2, channels: 3, background: { r: 140, g: 140, b: 140 } },
+        }).png().toBuffer(),
+        left: 0, top: 39,
+      },
+      {
+        input: await sharp({
+          create: { width: 2, height: 41, channels: 3, background: { r: 140, g: 140, b: 140 } },
+        }).png().toBuffer(),
+        left: 0, top: 0,
+      },
+      {
+        input: await sharp({
+          create: { width: 83, height: 14, channels: 3, background: { r: 120, g: 120, b: 120 } },
+        }).png().toBuffer(),
+        left: 11, top: 13,
+      },
+    ])
+    .png()
+    .toBuffer();
+
+  const frame = await sharp({
+    create: { width: 1024, height: 560, channels: 3, background: { r: 255, g: 255, b: 255 } },
+  })
+    .composite([
+      {
+        input: await sharp({
+          create: { width: 507, height: 3, channels: 3, background: { r: 0, g: 90, b: 135 } },
+        }).png().toBuffer(),
+        left: 181, top: 329,
+      },
+      {
+        input: await sharp({
+          create: { width: 507, height: 3, channels: 3, background: { r: 0, g: 90, b: 135 } },
+        }).png().toBuffer(),
+        left: 181, top: 367,
+      },
+      {
+        input: await sharp({
+          create: { width: 3, height: 41, channels: 3, background: { r: 0, g: 90, b: 135 } },
+        }).png().toBuffer(),
+        left: 181, top: 329,
+      },
+      {
+        input: await sharp({
+          create: { width: 83, height: 14, channels: 3, background: { r: 120, g: 120, b: 120 } },
+        }).png().toBuffer(),
+        left: 192, top: 342,
+      },
+    ])
+    .png()
+    .toBuffer();
+
+  const ocrCalls: Array<{ width?: number; height?: number }> = [];
+  const fakeOcr: OcrEngine = {
+    async recognize(image) {
+      const meta = await sharp(image).metadata();
+      ocrCalls.push({ width: meta.width, height: meta.height });
+      // Inset crop (width=497, height=31) strips the focus border and reads "Add title".
+      if ((meta.height ?? 0) <= 35 && (meta.width ?? 0) <= 500) {
+        return {
+          text: "Add title",
+          confidence: 90,
+          language: "vie+eng",
+          segments: [
+            {
+              id: "title-inset",
+              kind: "line",
+              text: "Add title",
+              confidence: 90,
+              bbox: { x: 6, y: 6, width: 83, height: 18 },
+            },
+          ],
+        };
+      }
+      // Full-viewport and local-ROI OCR miss the focused input text.
+      return { text: "Add Post", confidence: 96, language: "vie+eng", segments: [] };
+    },
+  };
+
+  const resolved = await resolveVisualTarget(frame, template, makeEnTitlePayload(), fakeOcr);
+  assert.equal(resolved.method, "ocr");
+  assert.equal(resolved.resolution.fallbackReason, "FOCUSED_BOX_INSET_OCR");
+  assert.ok(Math.abs(resolved.x - (181 + 5 + 6 + 83 / 2)) <= 1);
+  assert.ok(Math.abs(resolved.y - (329 + 5 + 6 + 18 / 2)) <= 1);
+  assert.ok(ocrCalls.some((c) => (c.height ?? 0) <= 35 && (c.width ?? 0) <= 500));
+});

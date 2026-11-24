@@ -87,6 +87,85 @@ function withClickOffset(
   const point = applyOcrClickOffset(match.x, match.y, target.clickOffset);
   return { ...match, x: point.x, y: point.y };
 }
+const FOCUSED_BOX_PROPOSAL_SCORE = 0.85;
+
+/**
+ * A focused input's dark focus border can hide light placeholder text from
+ * full-viewport PSM.SPARSE_TEXT. When full-viewport OCR finds no candidates,
+ * locate the box via template matching and re-run OCR on an inset crop that
+ * strips the focus border, still requiring full MIN_OCR_CONFIDENCE (>= 80).
+ */
+async function tryFocusedBoxInsetOcr(
+  frame: Buffer,
+  template: Buffer,
+  target: NonNullable<Payload["target"]>,
+  ocrSelection: NonNullable<NonNullable<Payload["target"]>["ocr"]>,
+  ocr: OcrEngine,
+  frameWidth: number,
+  frameHeight: number,
+  threshold: number,
+  trace: ResolutionTrace,
+  searchRegion?: Rect,
+  onOcr?: (event: { phase: "start" | "result"; offset: Rect; result?: OcrResult }) => void,
+  onImage?: (event: ImageSearchTrace) => void,
+): Promise<(NonNullable<Result["match"]> & { resolution: ResolutionTrace }) | null> {
+  let image: Awaited<ReturnType<typeof matchTemplate>>;
+  try {
+    image = await matchTemplate(frame, template, target.roi, {
+      expand: true,
+      threshold,
+      onSearch: onImage,
+    });
+  } catch {
+    return null;
+  }
+  const inRegion =
+    !searchRegion ||
+    (image.x >= searchRegion.x &&
+      image.x <= searchRegion.x + searchRegion.width &&
+      image.y >= searchRegion.y &&
+      image.y <= searchRegion.y + searchRegion.height);
+  if (image.ambiguous || !inRegion || image.score < FOCUSED_BOX_PROPOSAL_SCORE) {
+    return null;
+  }
+  const tplMeta = await sharp(template).metadata();
+  const tplW = tplMeta.width ?? target.roi.width;
+  const tplH = tplMeta.height ?? target.roi.height;
+  const inset = Math.min(5, Math.floor(Math.min(tplW, tplH) / 6));
+  if (inset <= 0) return null;
+
+  const left = Math.max(0, Math.round(image.x - tplW / 2) + inset);
+  const top = Math.max(0, Math.round(image.y - tplH / 2) + inset);
+  const right = Math.min(frameWidth, Math.round(image.x + tplW / 2) - inset);
+  const bottom = Math.min(frameHeight, Math.round(image.y + tplH / 2) - inset);
+  const width = right - left;
+  const height = bottom - top;
+  if (width <= 0 || height <= 0) return null;
+
+  const insetRect: Rect = { x: left, y: top, width, height };
+  try {
+    const crop = await sharp(frame).extract({ left, top, width, height }).png().toBuffer();
+    onOcr?.({ phase: "start", offset: insetRect });
+    const insetOcr = await ocr.recognize(crop);
+    onOcr?.({ phase: "result", offset: insetRect, result: insetOcr });
+    const textMatch = resolveOcrText(insetOcr, ocrSelection, insetRect);
+    trace.attempts.push({
+      method: "ocr",
+      outcome: "matched",
+      score: textMatch.score,
+      confidence: textMatch.confidence,
+      x: textMatch.x,
+      y: textMatch.y,
+      reason: "Focused input inset OCR match.",
+    });
+    trace.selectedMethod = "ocr";
+    trace.fallbackReason = "FOCUSED_BOX_INSET_OCR";
+    return { ...withClickOffset(textMatch, target), resolution: trace };
+  } catch {
+    return null;
+  }
+}
+
 async function resolveOcrInViewport(
   frame: Buffer,
   template: Buffer,
@@ -121,6 +200,28 @@ async function resolveOcrInViewport(
   // Context can use all text visible inside the container, including at its edges.
   const contextOcr = { ...result, segments: result.segments.filter(segment => withinRegion(segment.bbox)) };
   if (!candidates.length) {
+    if (
+      outsideRegionCount === 0 &&
+      template.length > 0 &&
+      target.roi?.width > 0 &&
+      target.roi?.height > 0
+    ) {
+      const focusedMatch = await tryFocusedBoxInsetOcr(
+        frame,
+        template,
+        target,
+        ocrSelection,
+        ocr,
+        size.width!,
+        size.height!,
+        Math.max(0.96, payload.threshold ?? 0.96),
+        trace,
+        searchRegion,
+        onOcr,
+        onImage,
+      );
+      if (focusedMatch) return focusedMatch;
+    }
     logClientEvent("OCR_CANDIDATES", {
       totalSegments: result.segments.length,
       matchedCandidates: allCandidates.length,
