@@ -1,0 +1,66 @@
+EN RELEASE 12 STEP 1 OCR NOT_FOUND — ROOT CAUSE REPORT
+====================================================
+
+1. EXECUTION IDENTITY
+---------------------
+- Instance: client-B
+- Baseline Commit: b0c416e748fe6f7382e9dd829519b75441437851
+- Target URL: https://maytuicanvas.com/wp-admin/post-new.php
+- Job UUID: acb5a608-3efe-47c2-8cbe-0fa5cefbfb08
+- Attempt UUID: 86ea94db-fcbf-4d20-9441-c8cba868bab6
+- Campaign UUID: Not logged in client.log (only jobId/attemptId/accountId/browserId/variantGroupId)
+- Variant Group UUID: 3f2c536f-0f52-40d9-9b2a-e0d483ac78ff
+- Pinned Variants in Claim (2026-11-23T05:02:13.657Z):
+  * Priority 1 (VI): variantId=03dd0c7c-7701-40af-906c-976f8734ecc8, packageKey=00c6ca04-3d37-4dbf-a4a3-5fc83e9b17a5, releaseId=4, version="1"
+    - contentDigest=5e0f3aafc2e1687359f4c9e64835160493d980122bfc185207671d18e53b8c9d
+    - executionDigest=8aa1831b8c637c4cfaccc802e945a99fd1a84b85d288a99d5697a7b30b36c72f
+  * Priority 2 (EN): variantId=b6a8af55-dcf9-425d-98e4-55a4e8687fc5, packageKey=382f26c4-d39a-4f2d-a8a3-d255f6c65c61, releaseId=12, version="1"
+    - contentDigest=b8e650873b59bd9f706ebc2b3f0d28cfdbb16d13f9b41a68ec24fe5e5bcedf4d
+    - executionDigest=d3c61ad82f8adbec8fec608a68540e8891965932178e92b5265158bafb5cb94c
+
+2. VI -> EN FALLBACK VERIFICATION
+---------------------------------
+- 05:03:16.143Z: VI Release 4 started Step 1 (stepId=a539bbf5-6ece-47d7-9f2e-1333fd151476, matchTo="top").
+- 05:03:16.278Z - 05:03:31.243Z: Bounded scroll search executed 5 scrolls (scrollTop 0 -> 999, scrollHeight 4678, goal 999.33). All 6 OCR passes returned matchedCandidates=0 (NO_CANDIDATE) because WordPress UI is in English ("Add title"), not Vietnamese.
+- 05:03:31.246Z: OCR_SCAN_TERMINATED (scanReason="DESTINATION_REACHED", confirmedNotFound=true, actionDispatched=false, ocrOutcome="NOT_FOUND").
+- 05:03:31.299Z: CAMPAIGN_JOB_FALLBACK_DECISION (eligible=true, reason="first_step_not_found_before_mutation", confirmedNotFound=true, mutated=false, stepIndex=0, stepsExecuted=0).
+- 05:03:31.299Z: CAMPAIGN_JOB_VARIANT_FALLBACK transitioned VI (releaseId=4) -> EN (releaseId=12) under the same jobId/attemptId.
+
+3. EN RELEASE 12 STEP 1 CONFIGURATION & EVIDENCE
+------------------------------------------------
+- Step ID: 8277dc02-284a-45b7-bb63-401881b6b568
+- Action: CLICK_AND_TYPE (click_and_type), kind=orc_visual, hasCssSelector=false, hasOcr=true, hasImageAsset=true
+- matchTo: "none"
+- OCR expected: kind="line", hasExpectedText=true, normalizedExpectedLen=9 (matches "Add title", 9 chars), requiredOcrConfidence=80
+- Template asset: 507x41 PNG (cached locally at .local/orc-assets/b1/b1f5b14317e370e6bf6c1a4d618f8db57216f8dee692470eb8fc50683654063c/2b58dbca-864e-4b86-b25b-1644cf515fd9.png, showing "Add title" input box)
+- Note: Full JSON manifest is pulled in-memory via /api/v1/social-automation/client/scripts/pull and not cached on disk; exact recorded target.roi.x/y is not persisted in client.log.
+
+4. VARIABLE BINDING METADATA
+----------------------------
+- AUTH_EXECUTION_STARTED: variableKeys=["title"]
+- STEP_INPUT_RESOLVED: stepIndex=0, action="click_and_type", variableKey="title", variablePresent=true, valueLength=47
+- Execution stopped in resolveVisualTarget() before click/type; mutated=false, stepsExecuted=0.
+
+5. VIEWPORT, OCR & TEMPLATE METRICS
+-----------------------------------
+- Viewport & Capture: 1024x560, deviceScaleFactor=1, displayScaleFactor=1, zoomFactor=1, layoutStable=true
+- Runtime EN Step 1 logs (05:03:32.984Z - 05:03:33.419Z):
+  * ORC_OCR_START: expectedKind="line", hasExpectedText=true, normalizedExpectedLen=9
+  * ORC_STEP_DIAGNOSTIC: templateWidth=507, templateHeight=41, candidateCount=64, bestOcrConfidence=null, requiredOcrConfidence=80, templateMatchConfidence=0.9178177779987735, selectedMatchingMethod=null, matchResult="not_confident", failureReason="NOT_FOUND: không có ứng viên chữ phù hợp."
+- Offline verification on failure screenshot (acb5a608-3efe-47c2-8cbe-0fa5cefbfb08_86ea94db-fcbf-4d20-9441-c8cba868bab6_v2_b6a8af55-dcf9-425d-98e4-55a4e8687fc5.png):
+  * LocalOcr (vie+eng) on full 1024x560 screenshot recognized "Add title" uniquely at bbox {x:192, y:340, width:83, height:18} with confidence=96 (>= 80).
+  * matchTemplate with expand=true using cached 507x41 asset matched at (x:434.5, y:349.5) with score=0.9999928176398765.
+
+6. FAILURE CLASSIFICATION & ROOT CAUSE
+--------------------------------------
+- Classification: Runtime defect in Electron OCR target resolution (ROI exclusion on matchTo="none"), compounded by EN Step 1 having matchTo="none" instead of "top".
+- Root Cause:
+  In src/main/orc/target-resolver.ts (resolveVisualTarget), when effectiveMatchTo(payload) === "none" and target.ocr?.confirmed is true:
+  1) matchTemplate is called with expand: !target.ocr?.confirmed (false), restricting image search to target.roi +/- 64px (scored 0.9178 < 0.96).
+  2) OCR is cropped strictly to target.roi +/- 64px (lines 318-329).
+  Because WordPress rendered two admin notices ("WordPress 7.1.5 is available!" and "This theme recommends the following plugins...") above the editor, the "Add title" field was pushed down to y=329..370 (outside target.roi +/- 64px). The local crop contained 64 OCR segments from the admin notice and 0 "Add title" candidates, causing resolveOcrText() to throw OcrNotFound without ever checking the rest of the visible 1024x560 viewport.
+
+7. FIX APPLIED
+--------------
+- src/main/orc/target-resolver.ts: Extracted resolveOcrInViewport() and added a safe fallback in the matchTo="none" branch so that when local ROI (+/-64px) OCR throws OcrNotFound (NOT_FOUND) and image match did not succeed, resolveVisualTarget falls back to full-viewport OCR (preserving MIN_OCR_CONFIDENCE=80, confirmOcrContext, ambiguity blocking, and strict >=0.96 template fallback).
+- tests/en-matchto-none-viewport-ocr.test.ts: Added regression tests for shifted-in-viewport matchTo="none" recovery and genuine full-viewport NOT_FOUND preservation.
