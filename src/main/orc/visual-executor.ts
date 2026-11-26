@@ -452,14 +452,23 @@ export class VisualOrcExecutor {
               this.host.zoom
             );
             if (!progress.moved) {
-              const scanReason = progress.reason ?? "SCROLL_STALLED";
+              // Destination reached with OCR miss ≠ scroll budget exhaustion.
+              const scanReason =
+                progress.reason === "DESTINATION_REACHED"
+                  ? "OCR_TARGET_MISSING_AT_DESTINATION"
+                  : (progress.reason ?? "SCROLL_STALLED");
               const confirmedNotFound =
-                scanReason === "DESTINATION_REACHED" &&
+                scanReason === "OCR_TARGET_MISSING_AT_DESTINATION" &&
                 !actionDispatched &&
                 !error.ambiguous &&
                 error.outcome === "NOT_FOUND";
+              // Keep blocked code NOT_FOUND so campaign variant fallback stays eligible.
               const code = confirmedNotFound ? "NOT_FOUND" : scanReason;
-              emitDiagnostic(scanReason, error.message, error.message, "blocked");
+              const message =
+                scanReason === "OCR_TARGET_MISSING_AT_DESTINATION"
+                  ? `OCR_TARGET_MISSING_AT_DESTINATION: đã tới đích Match To nhưng OCR không nhận ra chữ mục tiêu. ${error.message}`
+                  : error.message;
+              emitDiagnostic(scanReason, message, message, "blocked");
               logClientEvent("OCR_SCAN_TERMINATED", {
                 stepId: stepId ?? null,
                 scanReason,
@@ -472,7 +481,7 @@ export class VisualOrcExecutor {
               return {
                 kind: "blocked",
                 code,
-                message: error.message,
+                message,
                 confirmedNotFound,
                 mutated: actionDispatched,
               };
