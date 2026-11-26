@@ -29,6 +29,7 @@ import {
   prepareWindowForExecution,
   type ExecutionViewportVerification,
 } from "./execution-viewport.js";
+import { DOUBLE_RAF_SETTLE_SCRIPT } from "../jobs/ui-settle.js";
 
 export type { ExecutionViewportVerification };
 
@@ -1039,11 +1040,12 @@ export class EmbeddedBrowser {
       await sleepMs(100);
     }
     // One frame after load — login redirects often settle here.
+    // Bounded timeout prevents hanging when WebContentsView is hidden/occluded and rAF is throttled.
     try {
-      await wc.executeJavaScript(
-        "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))",
-        true
-      );
+      await Promise.race([
+        wc.executeJavaScript(DOUBLE_RAF_SETTLE_SCRIPT, true),
+        sleepMs(Math.min(timeoutMs, 1000)),
+      ]);
     } catch {
       /* ignore */
     }

@@ -156,6 +156,7 @@ function makeHost(artifactsDir: string, wc: WebContents): CampaignJobBrowserHost
           rects: [],
         }),
       }),
+    waitForSuccessScreenshotSettle: async () => {},
     captureSuccessScreenshot: async (p) =>
       captureAndPersistFailureScreenshot({
         webContents: wc,

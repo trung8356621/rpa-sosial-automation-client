@@ -168,6 +168,7 @@ function makeHost(
         }),
       });
     },
+    async waitForSuccessScreenshotSettle() {},
     async captureSuccessScreenshot(p) {
       return captureAndPersistFailureScreenshot({
         webContents: wc,

@@ -31,6 +31,7 @@ import {
 import type { FailureScreenshotArtifact } from "./failure-screenshot.js";
 import { JobAttemptIdempotencyStore, type PendingArtifactUpload } from "./idempotency.js";
 import { requireTitleBinding, resolveJobVariableBindings } from "./job-input-bindings.js";
+import { waitForBoundedUiSettle } from "./ui-settle.js";
 import { verifyWordPressDraft } from "./wordpress-draft-verify.js";
 
 export type CampaignJobBrowserHost = {
@@ -58,6 +59,11 @@ export type CampaignJobBrowserHost = {
     priority?: number;
     screenshotRole?: string;
   }) => Promise<FailureScreenshotArtifact | null>;
+  /**
+   * Optional override for the bounded post-action UI settle that runs before the
+   * terminal success screenshot. Tests may inject a no-op or fake clock.
+   */
+  waitForSuccessScreenshotSettle?: () => Promise<void>;
   open(browserId: string): Promise<void>;
   navigate?: (url: string) => Promise<void>;
   getWebContents(): WebContents | undefined;
@@ -791,9 +797,22 @@ export class CampaignJobExecutor {
         }
 
         // On success: clear execution status and keep ONE final success screenshot.
+        // SPA clicks (e.g. Publish) often return before the modal visually closes —
+        // settle briefly before capture. Release stays in finally after this path.
         this.host.updateExecutionStatus?.(null);
         let successShot: FailureScreenshotArtifact | null = null;
         if (this.host.captureSuccessScreenshot) {
+          try {
+            if (this.host.waitForSuccessScreenshotSettle) {
+              await this.host.waitForSuccessScreenshotSettle();
+            } else {
+              await waitForBoundedUiSettle({
+                webContents: this.host.getWebContents(),
+              });
+            }
+          } catch {
+            /* settle is best-effort; still attempt capture while view is alive */
+          }
           try {
             successShot = await this.host.captureSuccessScreenshot({
               jobId: claim.job_id,
