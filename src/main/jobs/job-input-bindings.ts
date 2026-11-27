@@ -45,6 +45,16 @@ export function flattenJobInput(input: Record<string, unknown>): Record<string, 
       out[key] = String(value);
       continue;
     }
+    if (Array.isArray(value)) {
+      const items = value
+        .filter((v) => typeof v === "string" || typeof v === "number")
+        .map((v) => String(v).trim())
+        .filter(Boolean);
+      if (items.length > 0) {
+        out[key] = JSON.stringify(items);
+      }
+      continue;
+    }
   }
   return out;
 }

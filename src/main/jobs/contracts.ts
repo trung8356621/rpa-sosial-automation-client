@@ -560,6 +560,10 @@ export function doesSiteKeyMatchSiteUrl(siteKey: string, siteUrl?: string | null
   const urlHost = hostFrom(rawUrl);
   if (!keyHost || !urlHost) return true;
 
+  if (rawKey === "qa_sandbox_facebook") {
+    return urlHost === "rpa-web-test.pages.dev" || urlHost.endsWith(".rpa-web-test.pages.dev");
+  }
+
   if (keyHost.includes(".")) {
     return keyHost === urlHost;
   }

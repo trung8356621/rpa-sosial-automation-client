@@ -231,4 +231,98 @@ export class OrcBrowserHost {
       this.webContents.sendInputEvent({ type: "char", keyCode: ch });
     }
   }
+
+  /** Intercept the file chooser opened by a visual click and assign local file paths via CDP. */
+  async uploadFiles(files: string[], click: () => void, timeoutMs = 8000): Promise<void> {
+    if (!files.length) {
+      throw new Error("UPLOAD_FILE thiếu danh sách file.");
+    }
+    const dbg = this.webContents.debugger;
+    const attachedHere = !dbg.isAttached();
+    if (attachedHere) {
+      dbg.attach("1.3");
+    }
+    let active = true;
+    let handled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const chosen = new Promise<void>((resolve, reject) => {
+      const fail = (message: string) => {
+        if (!active) return;
+        active = false;
+        reject(new Error(message));
+      };
+      const onMessage = (
+        _event: Electron.Event,
+        method: string,
+        params: { mode?: string; backendNodeId?: number },
+        sessionId?: string
+      ) => {
+        if (!active || method !== "Page.fileChooserOpened") return;
+        if (handled) {
+          fail("Có thêm file chooser trong cùng lần chạy UPLOAD_FILE.");
+          return;
+        }
+        handled = true;
+        if (!Number.isInteger(params?.backendNodeId) || Number(params.backendNodeId) <= 0) {
+          fail("File chooser không cung cấp backendNodeId.");
+          return;
+        }
+        void dbg
+          .sendCommand(
+            "DOM.setFileInputFiles",
+            { files, backendNodeId: params.backendNodeId as number },
+            sessionId || undefined
+          )
+          .then(
+            () => {
+              if (!active) return;
+              active = false;
+              resolve();
+            },
+            (err) => fail(`DOM.setFileInputFiles thất bại: ${String(err)}`)
+          );
+      };
+      dbg.on("message", onMessage);
+      timer = setTimeout(
+        () => fail("Không nhận được file chooser sau click UPLOAD_FILE."),
+        timeoutMs
+      );
+      void (async () => {
+        try {
+          await dbg.sendCommand("Page.enable");
+          await dbg.sendCommand("Page.setInterceptFileChooserDialog", { enabled: true });
+          click();
+        } catch (err) {
+          fail(`Không bật được file chooser intercept: ${String(err)}`);
+        }
+      })();
+      void chosenCleanup;
+      function chosenCleanup() {
+        dbg.off("message", onMessage);
+      }
+    });
+
+    try {
+      await chosen;
+    } finally {
+      active = false;
+      if (timer) clearTimeout(timer);
+      dbg.removeAllListeners("message");
+      try {
+        if (dbg.isAttached()) {
+          await dbg.sendCommand("Page.setInterceptFileChooserDialog", { enabled: false });
+        }
+      } catch {
+        /* ignore */
+      }
+      if (attachedHere && dbg.isAttached()) {
+        try {
+          dbg.detach();
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
 }

@@ -124,6 +124,8 @@ test("2. Wrong Site / Account / Browser / Package identity is rejected fail-clos
   assert.equal(doesSiteKeyMatchSiteUrl("maytuicanvas.com", "https://maytuicanvas.com/"), true);
   assert.equal(doesSiteKeyMatchSiteUrl("maytuicanvas.com", "https://www.maytuicanvas.com/wp-admin"), true);
   assert.equal(doesSiteKeyMatchSiteUrl("maytuicanvas.com", "https://baloquatang.com/"), false);
+  assert.equal(doesSiteKeyMatchSiteUrl("qa_sandbox_facebook", "https://rpa-web-test.pages.dev/"), true);
+  assert.equal(doesSiteKeyMatchSiteUrl("qa_sandbox_facebook", "https://facebook.com/"), false);
 
   // Conflicting script_id vs package_key rejected at parse
   assert.equal(

@@ -495,7 +495,7 @@ export class VisualOrcExecutor {
       } finally {
         if (matchTo) {
           await clearOcrSearch(this.host.webContents, {
-            restoreScroll: scrollMoved && !actionDispatched,
+            restoreScroll: scrollMoved && !match,
           });
         }
       }
@@ -513,6 +513,29 @@ export class VisualOrcExecutor {
 
       if (action === "WAIT_VERIFY") {
         emitDiagnostic("matched", match.method ?? "ok");
+        return { kind: "ok", action, x: match.x, y: match.y, method: match.method };
+      }
+
+      if (action === "UPLOAD_FILE") {
+        const files = parseUploadFileList(text);
+        if (files.length === 0) {
+          emitDiagnostic("error", "missing_upload_files", "MISSING_UPLOAD_FILES");
+          return { kind: "error", message: "UPLOAD_FILE thiếu danh sách file (files)" };
+        }
+        actionDispatched = true;
+        onPhase?.("click");
+        await this.host.uploadFiles(files, () => {
+          this.host.click(match!.x, match!.y, current.width, current.height);
+        });
+        logClientEvent("ORC_CLICK", {
+          stepId: stepId ?? null,
+          action,
+          method: match.method,
+          dispatched: true,
+          hasTextPayload: true,
+        });
+        emitDiagnostic("matched", match.method ?? "ok", null, "ok");
+        await sleep(750);
         return { kind: "ok", action, x: match.x, y: match.y, method: match.method };
       }
 
@@ -589,4 +612,23 @@ export class VisualOrcExecutor {
       return { kind: "error", message };
     }
   }
+}
+
+export function parseUploadFileList(raw?: string): string[] {
+  const trimmed = (raw || "").trim();
+  if (!trimmed) return [];
+  if (trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed.map((v) => String(v).trim()).filter(Boolean);
+      }
+    } catch {
+      // fall through to line split
+    }
+  }
+  return trimmed
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
