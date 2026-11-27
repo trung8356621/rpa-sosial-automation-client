@@ -88,6 +88,12 @@ export class AuthScriptRunner {
     jobId?: string;
     attemptId?: string;
     onProgress?: (event: AuthExecutionProgressEvent) => void;
+    onVisualStepFailure?: (failure: {
+      stepIndex: number;
+      code: string;
+      canRetry: boolean;
+      deadline: number;
+    }) => Promise<"verified" | "unresolved" | "unresolved_after_handler">;
   }): Promise<AuthRunOutcome> {
     const { webContents, release, account, signal } = params;
     const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -217,6 +223,8 @@ export class AuthScriptRunner {
             })
           : null;
 
+      let recoveryUsed = false;
+      let recoveryFailure: Extract<AuthRunOutcome, { kind: "error" }> | undefined;
       for (let i = 0; i < steps.length; i++) {
         if (signal?.aborted) {
           return {
@@ -360,8 +368,8 @@ export class AuthScriptRunner {
               totalSteps,
               code: failureCode,
             });
-            return {
-              kind: "error",
+            const failure = {
+              kind: "error" as const,
               message: `Step ${i}: ${out.message}`,
               stepsExecuted,
               stepIndex: i,
@@ -369,10 +377,33 @@ export class AuthScriptRunner {
               confirmedNotFound,
               mutated,
             };
+            if (recoveryFailure) return recoveryFailure;
+            if (params.onVisualStepFailure && !recoveryUsed && !signal?.aborted && Date.now() < deadline) {
+              const canRetry = payload.action === "WAIT_VERIFY";
+              let recovery: "verified" | "unresolved" | "unresolved_after_handler";
+              try {
+                recovery = await params.onVisualStepFailure({ stepIndex: i, code: failureCode, canRetry, deadline });
+              } catch {
+                logClientEvent("VISUAL_STEP_FAILURE_CALLBACK_FAILED", { stepIndex: i, code: failureCode });
+                recovery = "unresolved_after_handler";
+              }
+              if (recovery !== "unresolved") {
+                failure.confirmedNotFound = false;
+                failure.mutated = true;
+              }
+              if (canRetry && recovery === "verified" && !signal?.aborted && Date.now() < deadline) {
+                recoveryUsed = true;
+                recoveryFailure = failure;
+                i -= 1;
+                continue;
+              }
+            }
+            return failure;
           }
         }
 
         stepsExecuted += 1;
+        recoveryFailure = undefined;
         logClientEvent("AUTH_STEP_COMPLETED", {
           packageKey: release.package_key,
           releaseId: release.release_id,

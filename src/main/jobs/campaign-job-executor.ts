@@ -590,6 +590,7 @@ export class CampaignJobExecutor {
             : {}),
         });
 
+        let visualFailureShot: FailureScreenshotArtifact | null = null;
         const run = await this.runner.run({
           webContents,
           release: pull.release,
@@ -604,6 +605,14 @@ export class CampaignJobExecutor {
           inputValues: bindings.values,
           jobId: claim.job_id,
           attemptId: claim.attempt_id,
+          onVisualStepFailure: async ({ stepIndex }) => {
+            visualFailureShot = await this.captureVariantFailureScreenshot(claim, "ORC_ERROR", {
+              variant: variant ?? undefined,
+              screenshotRole: isVariantGroup ? "variant_failure" : "failure",
+              failedStep: stepIndex,
+            });
+            return "unresolved";
+          },
           onProgress: (ev) => {
             if (ev.kind === "step_phase") {
               const transitionFrom = pendingFallbackTransitionFrom;
@@ -649,7 +658,7 @@ export class CampaignJobExecutor {
             });
           }
 
-          const shot = await this.captureVariantFailureScreenshot(claim, mapped.code, {
+          const shot = visualFailureShot ?? await this.captureVariantFailureScreenshot(claim, mapped.code, {
             variant: variant ?? undefined,
             screenshotRole: isVariantGroup ? "variant_failure" : "failure",
             failedStep,

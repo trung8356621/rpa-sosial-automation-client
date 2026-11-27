@@ -10,6 +10,62 @@ import { hasExplicitTagContext, type AuthReleaseIdentity, type AuthReleasePulled
 import { SeoOpsHttpError } from "../src/shared/seo-ops-http.js";
 import { sanitizeLog } from "../src/main/main-error-log.js";
 import type { SessionSignal } from "../src/shared/contracts.js";
+import type { WebContents } from "electron";
+import { OrcAssetStore } from "../src/main/orc/asset-store.js";
+import { VisualOrcExecutor } from "../src/main/orc/visual-executor.js";
+
+test("visual failure interception retries verification once and never replays a publish click", async (t) => {
+  const store = new OrcAssetStore();
+  t.mock.method(store, "ensureAssets", async () => ({
+    ok: true,
+    byPath: new Map([["target.png", Buffer.from("fixture")]]),
+  }));
+  const runner = new AuthScriptRunner(store);
+  const actionCounts: string[] = [];
+  const execute = t.mock.method(VisualOrcExecutor.prototype, "executeVisualStep", async ({ payload }) => {
+    actionCounts.push(payload.action);
+    return { kind: "blocked", code: "NOT_FOUND", message: "original failure", confirmedNotFound: true };
+  });
+  const run = (action: string, restoreViewport: () => void, onFailure: (canRetry: boolean) => void) =>
+    runner.run({
+      webContents: {} as WebContents,
+      release: pulled({
+        manifest: {
+          assets: [{ path: "target.png" }],
+          steps: [{ action, target: { asset: "target.png", roi: { x: 0, y: 0, width: 20, height: 20 } } }],
+        },
+      }),
+      account: { accountId: "test", getPassword: async () => "" },
+      applyViewport: () => {},
+      restoreViewport,
+      downloadAsset: async () => { throw new Error("unexpected download"); },
+      onVisualStepFailure: async ({ canRetry }) => {
+        onFailure(canRetry);
+        return "verified";
+      },
+    });
+
+  let failures = 0;
+  let restored = false;
+  const outcome = await run("WAIT_VERIFY", () => { restored = true; }, (canRetry) => {
+    assert.equal(restored, false);
+    assert.equal(canRetry, true);
+    failures++;
+  });
+  assert.equal(failures, 1);
+  assert.equal(restored, true);
+  assert.deepEqual(actionCounts, ["WAIT_VERIFY", "WAIT_VERIFY"]);
+  assert.deepEqual(outcome, {
+    kind: "error", message: "Step 0: original failure", stepsExecuted: 0,
+    stepIndex: 0, code: "NOT_FOUND", confirmedNotFound: false, mutated: true,
+  });
+
+  const publish = await run("CLICK_TARGET", () => {}, (canRetry) => {
+    assert.equal(canRetry, false);
+  });
+  assert.equal(publish.kind, "error");
+  assert.equal(execute.mock.callCount(), 3);
+});
 
 const DIGEST = "a".repeat(64);
 
